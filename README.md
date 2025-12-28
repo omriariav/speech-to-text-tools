@@ -16,6 +16,26 @@ Transcribe audio files (`.m4a` and `.opus` formats) using OpenAI's Whisper. Can 
 
 Split large audio files into smaller segments of specified length. Useful for breaking up long recordings.
 
+### 4. auto_transcribe_meet.sh
+
+Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates both English and Hebrew transcripts with timestamped filenames.
+
+**Features:**
+- Accepts any video format (MP4, MOV, etc.) or M4A audio directly
+- Generates dual-language transcripts (English + Hebrew)
+- Timestamped output files for easy organization
+- Skips existing files to avoid duplicate work
+- Designed for use with macOS Folder Actions for fully automated processing
+
+**Output files:**
+```
+YYYY-MM-DD-HH-MM-Meeting-Name.m4a      # Extracted audio
+YYYY-MM-DD-HH-MM-Meeting-Name-en.txt   # English transcript
+YYYY-MM-DD-HH-MM-Meeting-Name-he.txt   # Hebrew transcript
+```
+
+See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md) for setting up automatic transcription when new recordings are added to a folder.
+
 ## Requirements
 
 - Python 3.7+
@@ -152,21 +172,46 @@ python audio_splitter.py path/to/audio_folder --file recording.m4a
 | `--segment-length`, `-s` | Length of each segment in seconds (default: 600) |
 | `--format` | Output format (m4a, opus, mp3, wav) |
 
+### Auto Transcription (auto_transcribe_meet.sh)
+
+#### Transcribe a video file (generates English + Hebrew):
+```
+./auto_transcribe_meet.sh /path/to/meeting.mp4
+```
+
+#### Transcribe an M4A file directly:
+```
+./auto_transcribe_meet.sh /path/to/audio.m4a
+```
+
+#### Configuration
+
+Edit the script to customize:
+- `WHISPER_MODEL`: Model size (tiny, base, small, medium, large)
+- `OUTPUT_DIR`: Where transcripts are saved
+- `LOG_FILE`: Log file location
+
+#### Automating with macOS Folder Actions
+
+For fully automated transcription when new recordings appear in a folder, see [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md).
+
 ## Output
 
 - Converted audio files are saved with the same name as the video files (with new extension)
 - Individual transcriptions are saved as text files with the same name as the audio files
 - Unified transcripts are saved as `unified_transcript_[order]_[timestamp].txt`
 - Split audio files are saved in the specified output directory with sequential numbering
+- Auto-transcription outputs timestamped files with language suffixes (`-en.txt`, `-he.txt`)
 
 ## Tips
 
 1. **Complete workflow**: Convert videos to audio with `video_converter.py`, then transcribe with `transcribe.py` for a complete video-to-text pipeline.
-2. For best transcription accuracy, use the larger models (`medium` or `large`), but note they require more processing time and memory.
-3. For faster processing with less accuracy, use the `tiny` or `base` models.
-4. The scripts automatically check for existing outputs to avoid duplicate work.
-5. When processing long audio files, consider splitting them first with `audio_splitter.py`.
-6. For high-quality audio extraction from videos, use `--bitrate 320k` with `video_converter.py`.
+2. **Automated workflow**: Use `auto_transcribe_meet.sh` with macOS Folder Actions to automatically transcribe new recordings in both English and Hebrew.
+3. For best transcription accuracy, use the larger models (`medium` or `large`), but note they require more processing time and memory.
+4. For faster processing with less accuracy, use the `tiny` or `base` models.
+5. The scripts automatically check for existing outputs to avoid duplicate work.
+6. When processing long audio files, consider splitting them first with `audio_splitter.py`.
+7. For high-quality audio extraction from videos, use `--bitrate 320k` with `video_converter.py`.
 
 ## License
 
