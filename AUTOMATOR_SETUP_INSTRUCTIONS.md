@@ -1,10 +1,16 @@
-# macOS Automator Directory Action Setup
+# macOS Automator Folder Action Setup
+
+Automatically transcribe video/audio files when added to a folder. Includes speaker diarization (identifies different speakers) and generates both English and Hebrew transcripts.
 
 ## Quick Setup Guide
 
-Follow these steps to set up automatic transcription for **NEW** Google Meet recordings only.
+Follow these steps to set up automatic transcription for **NEW** files only.
 
-**Important**: Existing MP4 files in the folder will be **ignored**. Only new files added after setup will be processed.
+**Important**: Existing files in the folder will be **ignored**. Only new files added after setup will be processed.
+
+---
+
+## Option A: Google Meet Recordings Folder
 
 ### Step 1: Open Automator
 1. Open **Automator** (⌘ + Space, type "Automator")
@@ -99,8 +105,11 @@ Timestamp is extracted from the **file creation date**.
 
 For a typical 30-minute meeting:
 - **Audio extraction**: ~10-30 seconds
-- **English transcription**: ~2-3 minutes
-- **Hebrew transcription**: ~2-3 minutes
+- **English transcription + diarization**: ~5-8 minutes
+- **Hebrew transcription + diarization**: ~5-8 minutes
+- **Total time**: ~10-17 minutes
+
+Without diarization (`ENABLE_DIARIZATION=false`):
 - **Total time**: ~5-7 minutes
 
 The script runs in the background - you don't need to wait.
@@ -134,7 +143,7 @@ chmod +x /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh
 ## Advanced Configuration
 
 ### Change Whisper Model
-Edit `/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh` line 15:
+Edit `/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh`:
 
 ```bash
 WHISPER_MODEL="medium"  # Options: tiny, base, small, medium, large
@@ -144,9 +153,13 @@ WHISPER_MODEL="medium"  # Options: tiny, base, small, medium, large
 - `medium`: Good balance (default) ⭐
 - `large`: Best accuracy but 2x slower
 
-### Change Audio Bitrate
-Edit the script, line 85:
+### Toggle Speaker Diarization
+```bash
+ENABLE_DIARIZATION=true   # Identify speakers (default)
+ENABLE_DIARIZATION=false  # Faster, no speaker labels
+```
 
+### Change Audio Bitrate
 ```bash
 --bitrate 192k  # Options: 128k, 192k, 256k, 320k
 ```
@@ -168,3 +181,74 @@ done
 ```
 
 But **Folder Actions will NOT automatically process existing files**.
+
+---
+
+## Option B: Downloads Folder
+
+Monitor your Downloads folder and automatically transcribe any MP4/M4A files.
+
+### Step 1: Open Automator
+1. Open **Automator** (⌘ + Space, type "Automator")
+2. Click **New Document**
+3. Select **Folder Action** as the document type
+4. Click **Choose**
+
+### Step 2: Configure Folder Monitoring
+1. At the top of the workflow, you'll see "Folder Action receives files and folders added to"
+2. Click the dropdown menu and select **Other...**
+3. Navigate to: `/Users/omri.a/Downloads`
+4. Click **Choose**
+
+### Step 3: Add Run Shell Script Action
+1. In the left sidebar, search for "Run Shell Script"
+2. Drag **Run Shell Script** to the workflow area on the right
+3. Configure the action:
+   - **Shell**: `/bin/bash` (default)
+   - **Pass input**: `as arguments`
+
+4. Replace the default script content with:
+   ```bash
+   for f in "$@"
+   do
+       if [[ "$f" =~ \.(mp4|MP4|m4a|M4A)$ ]]; then
+           /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh "$f"
+       fi
+   done
+   ```
+
+   > **Note**: This script includes a file type filter so only MP4/M4A files trigger transcription. Other downloads (PDFs, images, etc.) are ignored.
+
+### Step 4: Save the Workflow
+1. Press **⌘ + S** to save
+2. Name it: `Auto Transcribe Downloads`
+3. Click **Save**
+
+### Step 5: Enable Folder Actions (if needed)
+1. Right-click on the Downloads folder in Finder
+2. Go to **Services** → **Folder Actions Setup**
+3. Make sure "Enable Folder Actions" is checked
+4. Your workflow should appear in the list
+
+---
+
+## Speaker Diarization
+
+The script automatically identifies different speakers in your recordings:
+
+**English transcripts:**
+```
+Speaker 1: Hello, welcome to the meeting.
+Speaker 2: Thanks for having me.
+```
+
+**Hebrew transcripts:**
+```
+דובר 1: שלום, ברוכים הבאים לפגישה.
+דובר 2: תודה על ההזמנה.
+```
+
+To disable speaker diarization, edit `auto_transcribe_meet.sh` and set:
+```bash
+ENABLE_DIARIZATION=false
+```

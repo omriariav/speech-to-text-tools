@@ -12,20 +12,26 @@ Usage:
         --model medium \
         --lang he \
         --print
-        
+
     # Transcribe a single audio file:
     python transcribe.py /path/to/audio_file.m4a \
         --model medium \
         --lang he
-        
+
     # Only unify existing transcription files (no transcription):
     python transcribe.py /path/to/audio_folder \
         --unify asc
-        
+
     # Unify existing transcription files in descending order:
     python transcribe.py /path/to/audio_folder \
         --unify desc
 """
+# Suppress known deprecation warnings from dependencies
+import warnings
+warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
+warnings.filterwarnings("ignore", message="torchaudio._backend.list_audio_backends has been deprecated")
+warnings.filterwarnings("ignore", message="Module 'speechbrain.pretrained' was deprecated")
+
 import os
 import argparse
 import whisper
@@ -35,8 +41,203 @@ import sys
 import threading
 import datetime
 
-def transcribe_single_file(file_path: str, model_name: str, language: str, print_to_screen: bool):
-    """Transcribe a single audio file."""
+# Speaker labels for different languages
+SPEAKER_LABELS = {
+    "he": "דובר",      # Hebrew
+    "en": "Speaker",   # English
+    "es": "Orador",    # Spanish
+    "fr": "Orateur",   # French
+    "de": "Sprecher",  # German
+    "ar": "المتحدث",   # Arabic
+    "ru": "Спикер",    # Russian
+}
+
+
+def load_diarization_pipeline(auth_token: str = None):
+    """
+    Load the Pyannote speaker diarization pipeline.
+
+    Args:
+        auth_token: HuggingFace token. If None, uses HF_TOKEN env var or cached login.
+
+    Returns:
+        Pyannote Pipeline object
+
+    Raises:
+        EnvironmentError: If authentication fails
+    """
+    import torch
+
+    # Fix for PyTorch 2.6+ compatibility with pyannote models
+    # The models were saved with older PyTorch and need weights_only=False
+    # Monkeypatch torch.load to use weights_only=False for pyannote compatibility
+    _original_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+
+    from pyannote.audio import Pipeline
+
+    token = auth_token or os.environ.get("HF_TOKEN")
+
+    try:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=token
+        )
+        # Force CPU execution (matching existing whisper setup)
+        pipeline.to(torch.device("cpu"))
+        return pipeline
+    except Exception as e:
+        if "401" in str(e) or "authentication" in str(e).lower() or "gated" in str(e).lower():
+            raise EnvironmentError(
+                "HuggingFace authentication failed. Please either:\n"
+                "1. Set HF_TOKEN environment variable, or\n"
+                "2. Run 'huggingface-cli login'\n"
+                "See README for detailed setup instructions."
+            ) from e
+        raise
+
+
+def align_whisper_with_diarization(whisper_segments, diarization):
+    """
+    Align Whisper transcript segments with Pyannote diarization results.
+
+    Uses temporal intersection to find the speaker with maximum overlap
+    for each Whisper segment.
+
+    Args:
+        whisper_segments: List of Whisper segments with 'start', 'end', 'text' keys
+        diarization: Pyannote Annotation object with speaker turns
+
+    Returns:
+        List of dicts with 'speaker', 'start', 'end', 'text' keys
+    """
+    aligned_segments = []
+
+    for segment in whisper_segments:
+        seg_start = segment['start']
+        seg_end = segment['end']
+        seg_text = segment['text'].strip()
+
+        if not seg_text:
+            continue
+
+        # Find overlapping speaker turns
+        speaker_overlaps = {}
+
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            # Calculate intersection
+            overlap_start = max(seg_start, turn.start)
+            overlap_end = min(seg_end, turn.end)
+            overlap_duration = max(0, overlap_end - overlap_start)
+
+            if overlap_duration > 0:
+                speaker_overlaps[speaker] = speaker_overlaps.get(speaker, 0) + overlap_duration
+
+        # Assign speaker with maximum overlap, or UNKNOWN if no overlap
+        if speaker_overlaps:
+            assigned_speaker = max(speaker_overlaps, key=speaker_overlaps.get)
+        else:
+            assigned_speaker = "UNKNOWN"
+
+        aligned_segments.append({
+            'speaker': assigned_speaker,
+            'start': seg_start,
+            'end': seg_end,
+            'text': seg_text
+        })
+
+    return aligned_segments
+
+
+def merge_consecutive_speaker_segments(aligned_segments):
+    """
+    Merge consecutive segments from the same speaker for readability.
+
+    Args:
+        aligned_segments: List from align_whisper_with_diarization()
+
+    Returns:
+        List of merged segments with combined text
+    """
+    if not aligned_segments:
+        return []
+
+    merged = []
+    current = aligned_segments[0].copy()
+
+    for segment in aligned_segments[1:]:
+        if segment['speaker'] == current['speaker']:
+            # Same speaker - merge
+            current['end'] = segment['end']
+            current['text'] = current['text'] + " " + segment['text']
+        else:
+            # Different speaker - save current and start new
+            merged.append(current)
+            current = segment.copy()
+
+    # Don't forget the last segment
+    merged.append(current)
+
+    return merged
+
+
+def get_speaker_label(speaker_id: str, language: str) -> str:
+    """
+    Get localized speaker label based on language.
+
+    Args:
+        speaker_id: Pyannote speaker ID (e.g., "SPEAKER_00")
+        language: Language code (e.g., "he", "en")
+
+    Returns:
+        Localized speaker label (e.g., "דובר 1" for Hebrew)
+    """
+    # Extract speaker number from Pyannote ID (SPEAKER_00 -> 0)
+    try:
+        speaker_num = int(speaker_id.split("_")[-1]) + 1  # 1-indexed for readability
+    except (ValueError, IndexError):
+        speaker_num = speaker_id  # Fallback to original ID
+
+    label_word = SPEAKER_LABELS.get(language, "Speaker")
+    return f"{label_word} {speaker_num}"
+
+
+def format_diarized_transcript(merged_segments, language: str, include_timestamps: bool = False):
+    """
+    Format merged segments into labeled transcript text.
+
+    Args:
+        merged_segments: List from merge_consecutive_speaker_segments()
+        language: Language code for localized speaker labels
+        include_timestamps: If True, include [MM:SS-MM:SS] before each line
+
+    Returns:
+        Formatted transcript string
+    """
+    lines = []
+
+    for segment in merged_segments:
+        speaker_label = get_speaker_label(segment['speaker'], language)
+        text = segment['text']
+
+        if include_timestamps:
+            start_mins = int(segment['start'] // 60)
+            start_secs = int(segment['start'] % 60)
+            end_mins = int(segment['end'] // 60)
+            end_secs = int(segment['end'] % 60)
+            timestamp = f"[{start_mins:02d}:{start_secs:02d}-{end_mins:02d}:{end_secs:02d}]"
+            lines.append(f"{speaker_label}: {timestamp} {text}")
+        else:
+            lines.append(f"{speaker_label}: {text}")
+
+    return "\n".join(lines)
+
+def transcribe_single_file(file_path: str, model_name: str, language: str, print_to_screen: bool,
+                           diarize: bool = False, diarization_pipeline=None, include_timestamps: bool = False):
+    """Transcribe a single audio file, optionally with speaker diarization."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
         
@@ -86,20 +287,65 @@ def transcribe_single_file(file_path: str, model_name: str, language: str, print
         result = model.transcribe(
             file_path,
             language=language,
-            fp16=False
+            fp16=False,
+            word_timestamps=diarize  # Enable detailed timestamps when diarizing
         )
-        
+
         # Stop the progress animation
         stop_progress.set()
         progress_thread.join()
-        
+
         # Calculate and display elapsed time
         elapsed = time.time() - start_time
         print(f"✓   Finished transcribing {filename} in {elapsed:.1f} seconds")
-        
-        # Join segments with line breaks
-        lines = [seg["text"].strip() for seg in result.get("segments", [])]
-        transcript = "\n".join(lines)
+
+        # Process segments - with or without diarization
+        segments = result.get("segments", [])
+
+        if diarize and diarization_pipeline is not None:
+            # Run diarization
+            print(f"    Running speaker diarization on {filename}...")
+
+            # Pyannote requires WAV format - convert if needed
+            import subprocess
+            import tempfile
+            temp_wav = None
+            audio_for_diarization = file_path
+
+            if file_path.lower().endswith(('.m4a', '.opus', '.mp3', '.ogg')):
+                print(f"    Converting to WAV for diarization...")
+                temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                temp_wav.close()
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', file_path,
+                    '-ar', '16000', '-ac', '1',  # 16kHz mono for diarization
+                    temp_wav.name
+                ], capture_output=True)
+                audio_for_diarization = temp_wav.name
+
+            try:
+                diarization_result = diarization_pipeline(audio_for_diarization)
+            finally:
+                # Clean up temp file
+                if temp_wav and os.path.exists(temp_wav.name):
+                    os.unlink(temp_wav.name)
+
+            # Align Whisper segments with diarization
+            aligned = align_whisper_with_diarization(segments, diarization_result)
+
+            # Merge consecutive same-speaker segments
+            merged = merge_consecutive_speaker_segments(aligned)
+
+            # Format output with language-appropriate speaker labels
+            transcript = format_diarized_transcript(merged, language, include_timestamps)
+
+            # Update output filename to indicate diarization
+            txt_path = txt_path.replace(".txt", "_diarized.txt")
+            print(f"    Speaker diarization complete.")
+        else:
+            # Original behavior - just join segment text
+            lines = [seg["text"].strip() for seg in segments]
+            transcript = "\n".join(lines)
 
         # Write out .txt file
         with open(txt_path, "w", encoding="utf-8") as f:
@@ -188,16 +434,25 @@ def unify_transcripts(folder: str, sort_order: str):
     print(f"\n✅ Unified transcript saved to: {unified_file_path}")
     print(f"   Files sorted in {sort_direction} order by filename.")
 
-def transcribe_folder(folder: str, model_name: str, language: str, print_to_screen: bool, unify: str = None):
+def transcribe_folder(folder: str, model_name: str, language: str, print_to_screen: bool, unify: str = None,
+                      diarize: bool = False, include_timestamps: bool = False, hf_token: str = None):
     # Check if we should only unify existing files
     if unify and not model_name:
         unify_transcripts(folder, unify)
         return
-    
+
     # Load Whisper model once
     print("Loading Whisper model...")
     model = whisper.load_model(model_name, device="cpu")
     print(f"Model {model_name} loaded successfully.")
+
+    # Load diarization pipeline if requested
+    diarization_pipeline = None
+    if diarize:
+        print("Loading speaker diarization pipeline...")
+        print("Note: Speaker diarization on CPU may be slow for long recordings.")
+        diarization_pipeline = load_diarization_pipeline(hf_token)
+        print("Diarization pipeline loaded successfully.")
 
     # Ensure the folder exists
     if not os.path.isdir(folder):
@@ -268,20 +523,65 @@ def transcribe_folder(folder: str, model_name: str, language: str, print_to_scre
             result = model.transcribe(
                 file_path,
                 language=language,
-                fp16=False
+                fp16=False,
+                word_timestamps=diarize  # Enable detailed timestamps when diarizing
             )
-            
+
             # Stop the progress animation
             stop_progress.set()
             progress_thread.join()
-            
+
             # Calculate and display elapsed time
             elapsed = time.time() - start_time
             tqdm.write(f"✓   Finished transcribing {filename} in {elapsed:.1f} seconds")
-            
-            # Join segments with line breaks
-            lines = [seg["text"].strip() for seg in result.get("segments", [])]
-            transcript = "\n".join(lines)
+
+            # Process segments - with or without diarization
+            segments = result.get("segments", [])
+
+            if diarize and diarization_pipeline is not None:
+                # Run diarization
+                tqdm.write(f"    Running speaker diarization on {filename}...")
+
+                # Pyannote requires WAV format - convert if needed
+                import subprocess
+                import tempfile
+                temp_wav = None
+                audio_for_diarization = file_path
+
+                if file_path.lower().endswith(('.m4a', '.opus', '.mp3', '.ogg')):
+                    tqdm.write(f"    Converting to WAV for diarization...")
+                    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    temp_wav.close()
+                    subprocess.run([
+                        'ffmpeg', '-y', '-i', file_path,
+                        '-ar', '16000', '-ac', '1',  # 16kHz mono for diarization
+                        temp_wav.name
+                    ], capture_output=True)
+                    audio_for_diarization = temp_wav.name
+
+                try:
+                    diarization_result = diarization_pipeline(audio_for_diarization)
+                finally:
+                    # Clean up temp file
+                    if temp_wav and os.path.exists(temp_wav.name):
+                        os.unlink(temp_wav.name)
+
+                # Align Whisper segments with diarization
+                aligned = align_whisper_with_diarization(segments, diarization_result)
+
+                # Merge consecutive same-speaker segments
+                merged = merge_consecutive_speaker_segments(aligned)
+
+                # Format output with language-appropriate speaker labels
+                transcript = format_diarized_transcript(merged, language, include_timestamps)
+
+                # Update output filename to indicate diarization
+                txt_path = os.path.join(folder, f"{base_name}_diarized.txt")
+                tqdm.write(f"    Speaker diarization complete.")
+            else:
+                # Original behavior - just join segment text
+                lines = [seg["text"].strip() for seg in segments]
+                transcript = "\n".join(lines)
 
             # Write out .txt file
             with open(txt_path, "w", encoding="utf-8") as f:
@@ -377,6 +677,21 @@ if __name__ == "__main__":
         choices=["asc", "desc"],
         help="Create a unified transcript file with all transcriptions, sorted by filename (asc=ascending, desc=descending)"
     )
+    parser.add_argument(
+        "--diarize", "-d",
+        action="store_true",
+        help="Enable speaker diarization (requires HuggingFace token, see README)"
+    )
+    parser.add_argument(
+        "--timestamps", "-t",
+        action="store_true",
+        help="Include timestamps in diarized output (only applies when --diarize is used)"
+    )
+    parser.add_argument(
+        "--hf-token",
+        default=None,
+        help="HuggingFace token for accessing Pyannote models (or set HF_TOKEN env var)"
+    )
     args = parser.parse_args()
 
     # Determine if path is a file or directory
@@ -399,27 +714,41 @@ if __name__ == "__main__":
     if is_file:
         if args.unify:
             print("Warning: --unify option is only applicable to directories, ignoring.")
-        
+
         # Default to medium model for single files if not specified
         args.model = args.model or "medium"
-        
+
+        # Load diarization pipeline if needed (for single file)
+        diarization_pipeline = None
+        if args.diarize:
+            print("Loading speaker diarization pipeline...")
+            print("Note: Speaker diarization on CPU may be slow for long recordings.")
+            diarization_pipeline = load_diarization_pipeline(getattr(args, 'hf_token', None))
+            print("Diarization pipeline loaded successfully.")
+
         # Transcribe the single file
         transcribe_single_file(
             file_path=args.path,
             model_name=args.model,
             language=args.lang,
-            print_to_screen=args.print
+            print_to_screen=args.print,
+            diarize=args.diarize,
+            diarization_pipeline=diarization_pipeline,
+            include_timestamps=args.timestamps
         )
     else:  # Directory
         # If only unifying, pass model=None, otherwise ensure it has a default
         if args.model:
             args.model = args.model or "medium"
-            
+
         # Process the directory
         transcribe_folder(
             folder=args.path,
             model_name=args.model,
             language=args.lang,
             print_to_screen=args.print,
-            unify=args.unify
+            unify=args.unify,
+            diarize=args.diarize,
+            include_timestamps=args.timestamps,
+            hf_token=getattr(args, 'hf_token', None)
         )

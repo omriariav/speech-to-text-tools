@@ -18,11 +18,12 @@ Split large audio files into smaller segments of specified length. Useful for br
 
 ### 4. auto_transcribe_meet.sh
 
-Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates both English and Hebrew transcripts with timestamped filenames.
+Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates both English and Hebrew transcripts with timestamped filenames. Includes speaker diarization to identify different speakers.
 
 **Features:**
 - Accepts any video format (MP4, MOV, etc.) or M4A audio directly
 - Generates dual-language transcripts (English + Hebrew)
+- Speaker diarization (identifies Speaker 1, Speaker 2, etc.)
 - Timestamped output files for easy organization
 - Skips existing files to avoid duplicate work
 - Designed for use with macOS Folder Actions for fully automated processing
@@ -149,6 +150,85 @@ python transcribe.py path/to/audio_folder --unify
 | `--lang`, `-l` | Language code (default: he) |
 | `--print`, `-p` | Print transcripts to console |
 | `--unify`, `-u` | Create a unified transcript file (asc or desc order) |
+| `--diarize`, `-d` | Enable speaker diarization (requires HuggingFace setup) |
+| `--timestamps`, `-t` | Include timestamps in diarized output |
+| `--hf-token` | HuggingFace token (or set HF_TOKEN env var) |
+
+### Speaker Diarization
+
+Identify and label different speakers in your transcripts. Speaker labels are localized to match the transcription language.
+
+#### Setup (One-time)
+
+1. **Create HuggingFace Account**
+   - Visit https://huggingface.co/join
+   - Complete registration
+
+2. **Accept Model License Agreements**
+   - Visit https://huggingface.co/pyannote/speaker-diarization-3.1
+   - Click "Agree and access repository"
+   - Also accept at https://huggingface.co/pyannote/segmentation-3.0
+
+3. **Generate Access Token**
+   - Go to https://huggingface.co/settings/tokens
+   - Click "New token"
+   - Select "Read" access
+   - Copy the token (starts with `hf_...`)
+
+4. **Configure Token**
+   ```bash
+   # Add to your shell profile (~/.zshrc or ~/.bash_profile)
+   export HF_TOKEN="hf_your_token_here"
+   ```
+
+5. **Install Pyannote**
+   ```bash
+   source whisper-env/bin/activate
+   pip install pyannote.audio
+   ```
+
+#### Usage
+
+```bash
+# Basic diarization (English)
+python transcribe.py meeting.m4a --model medium --lang en --diarize
+
+# Hebrew with speaker labels
+python transcribe.py meeting.m4a --model medium --lang he --diarize
+
+# With timestamps
+python transcribe.py meeting.m4a --model medium --diarize --timestamps
+```
+
+#### Output Format
+
+**English (`--lang en`):**
+```
+Speaker 1: Hello, welcome to the meeting.
+Speaker 2: Thanks for having me.
+Speaker 1: Let's start with the first topic.
+```
+
+**Hebrew (`--lang he`):**
+```
+דובר 1: שלום, ברוכים הבאים לפגישה.
+דובר 2: תודה על ההזמנה.
+דובר 1: בואו נתחיל עם הנושא הראשון.
+```
+
+**With `--timestamps`:**
+```
+Speaker 1: [00:00-00:05] Hello, welcome to the meeting.
+Speaker 2: [00:05-00:08] Thanks for having me.
+```
+
+Diarized transcripts are saved with `_diarized` suffix (e.g., `meeting_diarized.txt`).
+
+#### Performance Notes
+
+- Speaker diarization on CPU adds processing time (~5-15 min per hour of audio)
+- For long recordings, consider splitting first with `audio_splitter.py`
+- Supported languages: English, Hebrew, Spanish, French, German, Arabic, Russian (others default to English labels)
 
 ### Audio Splitting (audio_splitter.py)
 
@@ -190,6 +270,7 @@ Edit the script to customize:
 - `WHISPER_MODEL`: Model size (tiny, base, small, medium, large)
 - `OUTPUT_DIR`: Where transcripts are saved
 - `LOG_FILE`: Log file location
+- `ENABLE_DIARIZATION`: Speaker identification (true/false)
 
 #### Automating with macOS Folder Actions
 

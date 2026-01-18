@@ -2,6 +2,7 @@
 #
 # Auto-transcribe Google Meet recordings with timestamped filenames
 # Converts video -> M4A and transcribes in both English and Hebrew
+# Includes speaker diarization to identify different speakers
 # Accepts any video format supported by ffmpeg (with or without extension)
 # If input is already M4A, skips conversion and transcribes directly
 #
@@ -16,6 +17,7 @@ VENV_DIR="$TOOLS_DIR/whisper-env"
 LOG_FILE="/Users/omri.a/Code/omri_plygrnd/meetings_context/auto_transcribe.log"
 OUTPUT_DIR="/Users/omri.a/Code/omri_plygrnd/meetings_context"
 WHISPER_MODEL="medium"
+ENABLE_DIARIZATION=true  # Set to false to disable speaker identification
 
 # Function to log messages
 log() {
@@ -119,13 +121,24 @@ if [ -f "$EN_TRANSCRIPT" ]; then
     log "English transcript already exists: $EN_TRANSCRIPT"
 else
     log "Transcribing in English..."
-    python3 "$TOOLS_DIR/transcribe.py" \
-        "$M4A_FILE" \
-        --model "$WHISPER_MODEL" \
-        --lang en
+    if [ "$ENABLE_DIARIZATION" = true ]; then
+        log "Speaker diarization enabled"
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$WHISPER_MODEL" \
+            --lang en \
+            --diarize
+        # Diarized output has _diarized suffix
+        TEMP_EN="${OUTPUT_DIR}/${BASE_NAME}_diarized.txt"
+    else
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$WHISPER_MODEL" \
+            --lang en
+        TEMP_EN="${OUTPUT_DIR}/${BASE_NAME}.txt"
+    fi
 
     # Rename the output to our format
-    TEMP_EN="${OUTPUT_DIR}/${BASE_NAME}.txt"
     if [ -f "$TEMP_EN" ]; then
         mv "$TEMP_EN" "$EN_TRANSCRIPT"
         log "English transcript saved: $EN_TRANSCRIPT"
@@ -140,13 +153,24 @@ if [ -f "$HE_TRANSCRIPT" ]; then
     log "Hebrew transcript already exists: $HE_TRANSCRIPT"
 else
     log "Transcribing in Hebrew..."
-    python3 "$TOOLS_DIR/transcribe.py" \
-        "$M4A_FILE" \
-        --model "$WHISPER_MODEL" \
-        --lang he
+    if [ "$ENABLE_DIARIZATION" = true ]; then
+        log "Speaker diarization enabled"
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$WHISPER_MODEL" \
+            --lang he \
+            --diarize
+        # Diarized output has _diarized suffix
+        TEMP_HE="${OUTPUT_DIR}/${BASE_NAME}_diarized.txt"
+    else
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$WHISPER_MODEL" \
+            --lang he
+        TEMP_HE="${OUTPUT_DIR}/${BASE_NAME}.txt"
+    fi
 
     # Rename the output to our format
-    TEMP_HE="${OUTPUT_DIR}/${BASE_NAME}.txt"
     if [ -f "$TEMP_HE" ]; then
         mv "$TEMP_HE" "$HE_TRANSCRIPT"
         log "Hebrew transcript saved: $HE_TRANSCRIPT"
@@ -158,6 +182,9 @@ fi
 
 log "=========================================="
 log "Auto-transcription completed successfully!"
+if [ "$ENABLE_DIARIZATION" = true ]; then
+    log "Speaker diarization: ENABLED"
+fi
 log "Output files:"
 log "  - Audio: $M4A_FILE"
 log "  - English: $EN_TRANSCRIPT"

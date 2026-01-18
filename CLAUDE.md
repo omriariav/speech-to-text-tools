@@ -23,7 +23,7 @@ brew install ffmpeg  # macOS
 ## Core Scripts
 
 ### transcribe.py
-Batch transcribe audio files (.m4a, .opus) using Whisper.
+Batch transcribe audio files (.m4a, .opus) using Whisper. Supports speaker diarization with Pyannote.
 
 ```bash
 # Single file
@@ -34,10 +34,24 @@ python transcribe.py ./folder --model medium --unify asc
 
 # Unify existing transcripts only (no transcription)
 python transcribe.py ./folder --unify desc
+
+# Speaker diarization (requires HuggingFace token - see README)
+python transcribe.py meeting.m4a --model medium --lang en --diarize
+
+# Hebrew with localized speaker labels (דובר 1, דובר 2, ...)
+python transcribe.py meeting.m4a --model medium --lang he --diarize
+
+# With timestamps
+python transcribe.py meeting.m4a --model medium --diarize --timestamps
 ```
 
 Models: tiny, base, small, medium (default), large
 Default language: Hebrew (he)
+
+**Diarization output format:**
+- English: `Speaker 1: Hello...`
+- Hebrew: `דובר 1: שלום...`
+- Diarized files saved as `*_diarized.txt`
 
 ### video_converter.py
 Extract audio from video files (.mp4, .mov, .avi, .mkv, etc.)
@@ -56,11 +70,23 @@ python audio_splitter.py ./folder --file recording.m4a --output ./split
 ```
 
 ### auto_transcribe_meet.sh
-Automation script for Google Meet recordings. Converts MP4 to M4A and transcribes in both English and Hebrew. Designed for use with macOS Folder Actions.
+Automation script for video/audio files. Converts MP4 to M4A and transcribes in both English and Hebrew with speaker diarization. Designed for use with macOS Folder Actions.
 
 ```bash
 ./auto_transcribe_meet.sh /path/to/video.mp4
+./auto_transcribe_meet.sh /path/to/audio.m4a
 ```
+
+**Configuration options** (edit script):
+- `WHISPER_MODEL`: tiny, base, small, medium (default), large
+- `ENABLE_DIARIZATION`: true (default) / false
+- `OUTPUT_DIR`: Where transcripts are saved
+
+**Folder Actions setup:**
+- Meet Recordings folder: processes all files
+- Downloads folder: filters for .mp4/.m4a only
+
+See AUTOMATOR_SETUP_INSTRUCTIONS.md for setup details.
 
 ## Architecture Notes
 
