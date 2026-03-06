@@ -29,6 +29,9 @@ Batch transcribe audio files (.m4a, .opus) using Whisper. Supports speaker diari
 # Single file
 python transcribe.py audio.m4a --model medium --lang en
 
+# Explicit output path
+python transcribe.py audio.m4a --model large --lang en --output /path/to/output.txt
+
 # Directory with unified output
 python transcribe.py ./folder --model medium --unify asc
 
@@ -37,6 +40,9 @@ python transcribe.py ./folder --unify desc
 
 # Speaker diarization (requires HuggingFace token - see README)
 python transcribe.py meeting.m4a --model medium --lang en --diarize
+
+# Diarization with explicit output path
+python transcribe.py meeting.m4a --model medium --lang en --diarize --output /path/to/meeting-diarized.txt
 
 # Hebrew with localized speaker labels (דובר 1, דובר 2, ...)
 python transcribe.py meeting.m4a --model medium --lang he --diarize
@@ -70,16 +76,23 @@ python audio_splitter.py ./folder --file recording.m4a --output ./split
 ```
 
 ### auto_transcribe_meet.sh
-Automation script for video/audio files. Converts MP4 to M4A and transcribes in both English and Hebrew with speaker diarization. Designed for use with macOS Folder Actions.
+Automation script for video/audio files. Two-mode transcription: fast Whisper-only transcripts are available immediately, then diarized (speaker-identified) transcripts follow. Designed for use with macOS Folder Actions.
 
 ```bash
 ./auto_transcribe_meet.sh /path/to/video.mp4
 ./auto_transcribe_meet.sh /path/to/audio.m4a
 ```
 
+**Two-mode flow:**
+1. Convert video → M4A (if needed)
+2. **Fast transcription** (Whisper only, `large` model) → `{name}-he.txt`, `{name}-en.txt`
+3. **Diarized transcription** (Whisper `medium` + Pyannote) → `{name}-he-diarized.txt`, `{name}-en-diarized.txt`
+
 **Configuration options** (edit script):
-- `WHISPER_MODEL`: tiny, base, small, medium (default), large
-- `ENABLE_DIARIZATION`: true (default) / false
+- `ENABLE_FAST`: true (default) / false — toggle fast transcription
+- `FAST_MODEL`: large (default) — model for fast transcription
+- `ENABLE_DIARIZATION`: true (default) / false — toggle speaker identification
+- `DIARIZE_MODEL`: medium (default) — model for diarized transcription
 - `OUTPUT_DIR`: Where transcripts are saved
 
 **Folder Actions setup:**

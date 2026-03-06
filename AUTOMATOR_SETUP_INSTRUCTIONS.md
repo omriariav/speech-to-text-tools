@@ -63,10 +63,12 @@ When you add a new MP4 file to the Meet Recordings folder:
 
 1. **Folder Action triggers** automatically
 2. **Script executes** in the background
-3. **Three files are created** in the same folder:
+3. **Up to five files are created** in the output directory:
    - `YYYY-MM-DD-HH-MM-Meeting-Name.m4a` (audio)
-   - `YYYY-MM-DD-HH-MM-Meeting-Name-en.txt` (English transcript)
-   - `YYYY-MM-DD-HH-MM-Meeting-Name-he.txt` (Hebrew transcript)
+   - `YYYY-MM-DD-HH-MM-Meeting-Name-he.txt` (Hebrew transcript, fast)
+   - `YYYY-MM-DD-HH-MM-Meeting-Name-en.txt` (English transcript, fast)
+   - `YYYY-MM-DD-HH-MM-Meeting-Name-he-diarized.txt` (Hebrew with speakers)
+   - `YYYY-MM-DD-HH-MM-Meeting-Name-en-diarized.txt` (English with speakers)
 
 ## Testing
 
@@ -89,28 +91,28 @@ tail -f /tmp/auto_transcribe.log
 
 ## Files Created
 
-All files are saved in the **same folder** as the original MP4:
+All output files are saved to the configured `OUTPUT_DIR`:
 
 ```
-Meet Recordings/
-├── Team Standup.mp4                          # Original (unchanged)
-├── 2025-11-23-14-30-Team-Standup.m4a        # Audio extracted
-├── 2025-11-23-14-30-Team-Standup-en.txt     # English transcript
-└── 2025-11-23-14-30-Team-Standup-he.txt     # Hebrew transcript
+meetings_context/
+├── 2025-11-23-14-30-Team-Standup.m4a              # Audio extracted
+├── 2025-11-23-14-30-Team-Standup-he.txt           # Hebrew (fast, no speakers)
+├── 2025-11-23-14-30-Team-Standup-en.txt           # English (fast, no speakers)
+├── 2025-11-23-14-30-Team-Standup-he-diarized.txt  # Hebrew (with speakers)
+└── 2025-11-23-14-30-Team-Standup-en-diarized.txt  # English (with speakers)
 ```
 
-Timestamp is extracted from the **file creation date**.
+Fast transcripts are available within minutes. Diarized transcripts follow afterward.
 
 ## Performance Notes
 
 For a typical 30-minute meeting:
 - **Audio extraction**: ~10-30 seconds
-- **English transcription + diarization**: ~5-8 minutes
-- **Hebrew transcription + diarization**: ~5-8 minutes
-- **Total time**: ~10-17 minutes
+- **Fast transcription** (HE + EN, large model): ~5-10 minutes — transcripts available immediately
+- **Diarized transcription** (HE + EN, medium model + Pyannote): ~10-16 minutes — runs after fast
 
-Without diarization (`ENABLE_DIARIZATION=false`):
-- **Total time**: ~5-7 minutes
+Fast-only (`ENABLE_DIARIZATION=false`): ~5-10 minutes total
+Diarize-only (`ENABLE_FAST=false`): ~10-17 minutes total
 
 The script runs in the background - you don't need to wait.
 
@@ -142,22 +144,21 @@ chmod +x /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh
 
 ## Advanced Configuration
 
-### Change Whisper Model
 Edit `/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh`:
 
+### Toggle Transcription Modes
 ```bash
-WHISPER_MODEL="medium"  # Options: tiny, base, small, medium, large
+ENABLE_FAST=true           # Fast Whisper-only transcription (default: true)
+ENABLE_DIARIZATION=true    # Diarized with speaker IDs (default: true)
 ```
 
-- `tiny/base`: Faster but less accurate
-- `medium`: Good balance (default) ⭐
-- `large`: Best accuracy but 2x slower
-
-### Toggle Speaker Diarization
+### Change Whisper Models
 ```bash
-ENABLE_DIARIZATION=true   # Identify speakers (default)
-ENABLE_DIARIZATION=false  # Faster, no speaker labels
+FAST_MODEL="large"         # Model for fast transcription (default: large)
+DIARIZE_MODEL="medium"     # Model for diarized transcription (default: medium)
 ```
+
+Model options: `tiny`, `base`, `small`, `medium`, `large`
 
 ### Change Audio Bitrate
 ```bash
@@ -250,5 +251,5 @@ Speaker 2: Thanks for having me.
 
 To disable speaker diarization, edit `auto_transcribe_meet.sh` and set:
 ```bash
-ENABLE_DIARIZATION=false
+ENABLE_DIARIZATION=false  # Only fast transcripts will be produced
 ```
