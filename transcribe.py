@@ -252,6 +252,8 @@ def transcribe_single_file(file_path: str, model_name: str, language: str, print
     output_dir = os.path.dirname(file_path)
     if output_path:
         txt_path = output_path
+    elif diarize:
+        txt_path = os.path.join(output_dir, f"{base_name}_diarized.txt")
     else:
         txt_path = os.path.join(output_dir, f"{base_name}.txt")
 
@@ -343,9 +345,6 @@ def transcribe_single_file(file_path: str, model_name: str, language: str, print
             # Format output with language-appropriate speaker labels
             transcript = format_diarized_transcript(merged, language, include_timestamps)
 
-            # Update output filename to indicate diarization (only if no explicit output path)
-            if not output_path:
-                txt_path = txt_path.replace(".txt", "_diarized.txt")
             print(f"    Speaker diarization complete.")
         else:
             # Original behavior - just join segment text
@@ -486,8 +485,11 @@ def transcribe_folder(folder: str, model_name: str, language: str, print_to_scre
     for filename in tqdm(audio_files, desc="Processing files", unit="file"):
         file_path = os.path.join(folder, filename)
         base_name = os.path.splitext(filename)[0]
-        txt_path = os.path.join(folder, f"{base_name}.txt")
-        
+        if diarize:
+            txt_path = os.path.join(folder, f"{base_name}_diarized.txt")
+        else:
+            txt_path = os.path.join(folder, f"{base_name}.txt")
+
         # Check if transcript already exists
         transcript_exists = os.path.exists(txt_path)
         
@@ -580,8 +582,6 @@ def transcribe_folder(folder: str, model_name: str, language: str, print_to_scre
                 # Format output with language-appropriate speaker labels
                 transcript = format_diarized_transcript(merged, language, include_timestamps)
 
-                # Update output filename to indicate diarization
-                txt_path = os.path.join(folder, f"{base_name}_diarized.txt")
                 tqdm.write(f"    Speaker diarization complete.")
             else:
                 # Original behavior - just join segment text
