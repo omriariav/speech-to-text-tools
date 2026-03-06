@@ -16,8 +16,10 @@ TOOLS_DIR="/Users/omri.a/Code/speech-to-text-tools"
 VENV_DIR="$TOOLS_DIR/whisper-env"
 LOG_FILE="/Users/omri.a/Code/omri_plygrnd/meetings_context/auto_transcribe.log"
 OUTPUT_DIR="/Users/omri.a/Code/omri_plygrnd/meetings_context"
-WHISPER_MODEL="medium"
-ENABLE_DIARIZATION=true  # Set to false to disable speaker identification
+ENABLE_FAST=true           # Fast Whisper-only transcription (no diarization)
+FAST_MODEL="large"         # Model for fast transcription
+ENABLE_DIARIZATION=true    # Slower transcription with speaker identification
+DIARIZE_MODEL="medium"     # Model for diarized transcription
 
 # Function to log messages
 log() {
@@ -70,8 +72,10 @@ mkdir -p "$OUTPUT_DIR"
 
 # Define output files (in meetings_context directory)
 M4A_FILE="${OUTPUT_DIR}/${BASE_NAME}.m4a"
-EN_TRANSCRIPT="${OUTPUT_DIR}/${BASE_NAME}-en.txt"
-HE_TRANSCRIPT="${OUTPUT_DIR}/${BASE_NAME}-he.txt"
+FAST_HE="${OUTPUT_DIR}/${BASE_NAME}-he.txt"
+FAST_EN="${OUTPUT_DIR}/${BASE_NAME}-en.txt"
+DIARIZED_HE="${OUTPUT_DIR}/${BASE_NAME}-he-diarized.txt"
+DIARIZED_EN="${OUTPUT_DIR}/${BASE_NAME}-en-diarized.txt"
 
 log "Output directory: $OUTPUT_DIR"
 
@@ -116,79 +120,76 @@ else
     fi
 fi
 
-# Step 2: Transcribe in English (if not already exists)
-if [ -f "$EN_TRANSCRIPT" ]; then
-    log "English transcript already exists: $EN_TRANSCRIPT"
-else
-    log "Transcribing in English..."
-    if [ "$ENABLE_DIARIZATION" = true ]; then
-        log "Speaker diarization enabled"
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$WHISPER_MODEL" \
-            --lang en \
-            --diarize
-        # Diarized output has _diarized suffix
-        TEMP_EN="${OUTPUT_DIR}/${BASE_NAME}_diarized.txt"
+# Step 2: Fast transcription (Whisper only, no diarization)
+if [ "$ENABLE_FAST" = true ]; then
+    log "--- Fast transcription (model: $FAST_MODEL) ---"
+
+    if [ -f "$FAST_HE" ]; then
+        log "Fast Hebrew transcript already exists: $FAST_HE"
     else
+        log "Fast transcribing in Hebrew..."
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
-            --model "$WHISPER_MODEL" \
-            --lang en
-        TEMP_EN="${OUTPUT_DIR}/${BASE_NAME}.txt"
+            --model "$FAST_MODEL" \
+            --lang he \
+            --output "$FAST_HE"
+        log "Fast Hebrew transcript saved: $FAST_HE"
     fi
 
-    # Rename the output to our format
-    if [ -f "$TEMP_EN" ]; then
-        mv "$TEMP_EN" "$EN_TRANSCRIPT"
-        log "English transcript saved: $EN_TRANSCRIPT"
+    if [ -f "$FAST_EN" ]; then
+        log "Fast English transcript already exists: $FAST_EN"
     else
-        log "ERROR: English transcription failed"
-        exit 1
+        log "Fast transcribing in English..."
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$FAST_MODEL" \
+            --lang en \
+            --output "$FAST_EN"
+        log "Fast English transcript saved: $FAST_EN"
     fi
 fi
 
-# Step 3: Transcribe in Hebrew (if not already exists)
-if [ -f "$HE_TRANSCRIPT" ]; then
-    log "Hebrew transcript already exists: $HE_TRANSCRIPT"
-else
-    log "Transcribing in Hebrew..."
-    if [ "$ENABLE_DIARIZATION" = true ]; then
-        log "Speaker diarization enabled"
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$WHISPER_MODEL" \
-            --lang he \
-            --diarize
-        # Diarized output has _diarized suffix
-        TEMP_HE="${OUTPUT_DIR}/${BASE_NAME}_diarized.txt"
+# Step 3: Diarized transcription (Whisper + Pyannote speaker identification)
+if [ "$ENABLE_DIARIZATION" = true ]; then
+    log "--- Diarized transcription (model: $DIARIZE_MODEL) ---"
+
+    if [ -f "$DIARIZED_HE" ]; then
+        log "Diarized Hebrew transcript already exists: $DIARIZED_HE"
     else
+        log "Diarized transcribing in Hebrew..."
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
-            --model "$WHISPER_MODEL" \
-            --lang he
-        TEMP_HE="${OUTPUT_DIR}/${BASE_NAME}.txt"
+            --model "$DIARIZE_MODEL" \
+            --lang he \
+            --diarize \
+            --output "$DIARIZED_HE"
+        log "Diarized Hebrew transcript saved: $DIARIZED_HE"
     fi
 
-    # Rename the output to our format
-    if [ -f "$TEMP_HE" ]; then
-        mv "$TEMP_HE" "$HE_TRANSCRIPT"
-        log "Hebrew transcript saved: $HE_TRANSCRIPT"
+    if [ -f "$DIARIZED_EN" ]; then
+        log "Diarized English transcript already exists: $DIARIZED_EN"
     else
-        log "ERROR: Hebrew transcription failed"
-        exit 1
+        log "Diarized transcribing in English..."
+        python3 "$TOOLS_DIR/transcribe.py" \
+            "$M4A_FILE" \
+            --model "$DIARIZE_MODEL" \
+            --lang en \
+            --diarize \
+            --output "$DIARIZED_EN"
+        log "Diarized English transcript saved: $DIARIZED_EN"
     fi
 fi
 
 log "=========================================="
 log "Auto-transcription completed successfully!"
-if [ "$ENABLE_DIARIZATION" = true ]; then
-    log "Speaker diarization: ENABLED"
-fi
+log "  Fast transcription: $([ "$ENABLE_FAST" = true ] && echo "ENABLED ($FAST_MODEL)" || echo "DISABLED")"
+log "  Diarization: $([ "$ENABLE_DIARIZATION" = true ] && echo "ENABLED ($DIARIZE_MODEL)" || echo "DISABLED")"
 log "Output files:"
 log "  - Audio: $M4A_FILE"
-log "  - English: $EN_TRANSCRIPT"
-log "  - Hebrew: $HE_TRANSCRIPT"
+[ "$ENABLE_FAST" = true ] && log "  - Hebrew (fast): $FAST_HE"
+[ "$ENABLE_FAST" = true ] && log "  - English (fast): $FAST_EN"
+[ "$ENABLE_DIARIZATION" = true ] && log "  - Hebrew (diarized): $DIARIZED_HE"
+[ "$ENABLE_DIARIZATION" = true ] && log "  - English (diarized): $DIARIZED_EN"
 log "=========================================="
 
 # Deactivate virtual environment

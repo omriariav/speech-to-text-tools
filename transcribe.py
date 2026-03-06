@@ -236,21 +236,25 @@ def format_diarized_transcript(merged_segments, language: str, include_timestamp
     return "\n".join(lines)
 
 def transcribe_single_file(file_path: str, model_name: str, language: str, print_to_screen: bool,
-                           diarize: bool = False, diarization_pipeline=None, include_timestamps: bool = False):
+                           diarize: bool = False, diarization_pipeline=None, include_timestamps: bool = False,
+                           output_path: str = None):
     """Transcribe a single audio file, optionally with speaker diarization."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
-        
+
     # Check file extension
     if not file_path.lower().endswith((".m4a", ".opus")):
         print(f"Warning: File {file_path} is not a supported audio format (.m4a or .opus). Attempting to transcribe anyway.")
-        
+
     # Get output path
     filename = os.path.basename(file_path)
     base_name = os.path.splitext(filename)[0]
     output_dir = os.path.dirname(file_path)
-    txt_path = os.path.join(output_dir, f"{base_name}.txt")
-    
+    if output_path:
+        txt_path = output_path
+    else:
+        txt_path = os.path.join(output_dir, f"{base_name}.txt")
+
     # Check if transcript already exists
     if os.path.exists(txt_path):
         print(f"📄 Transcript already exists at {txt_path}")
@@ -339,8 +343,9 @@ def transcribe_single_file(file_path: str, model_name: str, language: str, print
             # Format output with language-appropriate speaker labels
             transcript = format_diarized_transcript(merged, language, include_timestamps)
 
-            # Update output filename to indicate diarization
-            txt_path = txt_path.replace(".txt", "_diarized.txt")
+            # Update output filename to indicate diarization (only if no explicit output path)
+            if not output_path:
+                txt_path = txt_path.replace(".txt", "_diarized.txt")
             print(f"    Speaker diarization complete.")
         else:
             # Original behavior - just join segment text
@@ -688,6 +693,11 @@ if __name__ == "__main__":
         help="Include timestamps in diarized output (only applies when --diarize is used)"
     )
     parser.add_argument(
+        "--output", "-o",
+        default=None,
+        help="Explicit output file path (overrides automatic naming)"
+    )
+    parser.add_argument(
         "--hf-token",
         default=None,
         help="HuggingFace token for accessing Pyannote models (or set HF_TOKEN env var)"
@@ -734,7 +744,8 @@ if __name__ == "__main__":
             print_to_screen=args.print,
             diarize=args.diarize,
             diarization_pipeline=diarization_pipeline,
-            include_timestamps=args.timestamps
+            include_timestamps=args.timestamps,
+            output_path=args.output
         )
     else:  # Directory
         # If only unifying, pass model=None, otherwise ensure it has a default
