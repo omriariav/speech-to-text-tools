@@ -17,7 +17,7 @@ VENV_DIR="$TOOLS_DIR/whisper-env"
 LOG_FILE="/Users/omri.a/Code/omri_plygrnd/meetings_context/auto_transcribe.log"
 OUTPUT_DIR="/Users/omri.a/Code/omri_plygrnd/meetings_context"
 ENABLE_FAST=true           # Fast Whisper-only transcription (no diarization)
-FAST_MODEL="large"         # Model for fast transcription
+FAST_MODEL="medium"        # Model for fast transcription
 ENABLE_DIARIZATION=true    # Slower transcription with speaker identification
 DIARIZE_MODEL="medium"     # Model for diarized transcription
 
