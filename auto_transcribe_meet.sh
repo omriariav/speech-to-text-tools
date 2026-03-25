@@ -11,15 +11,25 @@
 
 set -e  # Exit on error
 
-# Configuration
-TOOLS_DIR="/Users/omri.a/Code/speech-to-text-tools"
-VENV_DIR="$TOOLS_DIR/whisper-env"
-LOG_FILE="/Users/omri.a/Code/omri_plygrnd/meetings_context/auto_transcribe.log"
-OUTPUT_DIR="/Users/omri.a/Code/omri_plygrnd/meetings_context"
-ENABLE_FAST=true           # Fast Whisper-only transcription (no diarization)
-FAST_MODEL="medium"        # Model for fast transcription
-ENABLE_DIARIZATION=true    # Slower transcription with speaker identification
-DIARIZE_MODEL="medium"     # Model for diarized transcription
+# Load environment configuration
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+else
+    echo "ERROR: .env file not found. Copy .env.example to .env and configure it."
+    exit 1
+fi
+
+# Validate required variables
+for var in TOOLS_DIR VENV_DIR OUTPUT_DIR LOG_FILE; do
+    if [ -z "${!var}" ]; then
+        echo "ERROR: $var is not set in .env"
+        exit 1
+    fi
+done
+
+# Ensure output directory exists before first log call
+mkdir -p "$OUTPUT_DIR"
 
 # Function to log messages
 log() {
@@ -67,10 +77,7 @@ SANITIZED_NAME=$(sanitize_filename "$ORIGINAL_FILENAME")
 BASE_NAME="${TIMESTAMP}-${SANITIZED_NAME}"
 log "Base name: $BASE_NAME"
 
-# Create output directory if it doesn't exist
-mkdir -p "$OUTPUT_DIR"
-
-# Define output files (in meetings_context directory)
+# Define output files
 M4A_FILE="${OUTPUT_DIR}/${BASE_NAME}.m4a"
 FAST_HE="${OUTPUT_DIR}/${BASE_NAME}-he.txt"
 FAST_EN="${OUTPUT_DIR}/${BASE_NAME}-en.txt"
