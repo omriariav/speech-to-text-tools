@@ -266,11 +266,21 @@ python audio_splitter.py path/to/audio_folder --file recording.m4a
 
 #### Configuration
 
-Edit the script to customize:
-- `WHISPER_MODEL`: Model size (tiny, base, small, medium, large)
-- `OUTPUT_DIR`: Where transcripts are saved
-- `LOG_FILE`: Log file location
-- `ENABLE_DIARIZATION`: Speaker identification (true/false)
+Copy `.env.example` to `.env` and edit it:
+```bash
+cp .env.example .env
+```
+
+| Variable | Description |
+|----------|-------------|
+| `TOOLS_DIR` | Path to this repository |
+| `VENV_DIR` | Path to the Python virtual environment |
+| `OUTPUT_DIR` | Where transcripts are saved |
+| `LOG_FILE` | Log file location |
+| `ENABLE_FAST` | Fast Whisper-only transcription (true/false) |
+| `FAST_MODEL` | Model for fast transcription (tiny, base, small, medium, large) |
+| `ENABLE_DIARIZATION` | Speaker identification (true/false) |
+| `DIARIZE_MODEL` | Model for diarized transcription |
 
 #### Automating with macOS Folder Actions
 
