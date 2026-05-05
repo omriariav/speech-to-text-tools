@@ -253,6 +253,66 @@ class TestFasterWhisperAdapter(unittest.TestCase):
         self.assertIn("faster-whisper", str(ctx.exception))
 
 
+class TestLoadDiarizationPipelineTokenHandling(unittest.TestCase):
+    """Regression test: empty HF_TOKEN env must not be passed verbatim to pyannote.
+
+    When .env has HF_TOKEN="" and `set -a; source .env` exports it, the
+    Python child sees os.environ["HF_TOKEN"] = "". That empty string must
+    be normalized to None so pyannote falls back to the cached CLI login
+    instead of attempting auth with an empty token.
+    """
+
+    def _invoke_with_env_token(self, env_value):
+        """Call load_diarization_pipeline with mocked deps and return the
+        token argument that would have been passed to pyannote."""
+        captured = {}
+
+        # Build a fake pyannote.audio.Pipeline whose from_pretrained
+        # records the use_auth_token kwarg
+        fake_pipeline_class = MagicMock()
+        fake_pipeline_instance = MagicMock()
+
+        def fake_from_pretrained(repo, use_auth_token=None, **kwargs):
+            captured["token"] = use_auth_token
+            return fake_pipeline_instance
+
+        fake_pipeline_class.from_pretrained = fake_from_pretrained
+
+        fake_pyannote_audio = MagicMock()
+        fake_pyannote_audio.Pipeline = fake_pipeline_class
+        fake_torch = MagicMock()
+        fake_torch.device = MagicMock(return_value="cpu")
+        fake_torch.load = MagicMock()
+
+        env_patch = {} if env_value is None else {"HF_TOKEN": env_value}
+        with patch.dict(os.environ, env_patch, clear=False), \
+             patch.dict(sys.modules, {
+                 "pyannote": MagicMock(),
+                 "pyannote.audio": fake_pyannote_audio,
+                 "torch": fake_torch,
+             }):
+            # If env_value is None, also strip an existing HF_TOKEN from environ
+            if env_value is None:
+                os.environ.pop("HF_TOKEN", None)
+            transcribe.load_diarization_pipeline(auth_token=None)
+        return captured["token"]
+
+    def test_empty_env_token_normalized_to_none(self):
+        # Empty string from .env must not become use_auth_token=""
+        token = self._invoke_with_env_token("")
+        self.assertIsNone(token,
+            "Empty HF_TOKEN env should be normalized to None so pyannote "
+            "falls back to cached huggingface-cli login")
+
+    def test_real_env_token_propagates(self):
+        token = self._invoke_with_env_token("hf_realToken123")
+        self.assertEqual(token, "hf_realToken123")
+
+    def test_unset_env_token_is_none(self):
+        token = self._invoke_with_env_token(None)
+        self.assertIsNone(token)
+
+
 class TestResolveHFToken(unittest.TestCase):
     def setUp(self):
         # Use a tempdir-based fake HOME so we never read/write real cache

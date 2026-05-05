@@ -235,7 +235,12 @@ def load_diarization_pipeline(auth_token: str = None):
 
     from pyannote.audio import Pipeline
 
-    token = auth_token or os.environ.get("HF_TOKEN")
+    # Trailing `or None` normalizes the empty-string case: when .env contains
+    # HF_TOKEN="" and the shell exports it, os.environ.get returns "" (truthy
+    # to Python only as a string presence test, but falsy in `or`-chains).
+    # Without this, pyannote receives use_auth_token="" and tries to auth
+    # with an empty token instead of falling back to the cached CLI login.
+    token = auth_token or os.environ.get("HF_TOKEN") or None
 
     try:
         pipeline = Pipeline.from_pretrained(

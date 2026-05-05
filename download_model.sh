@@ -23,7 +23,7 @@ else
     echo "⚠️  No .env file found — using built-in defaults"
 fi
 
-ENGINE="${TRANSCRIPTION_ENGINE:-mlx-whisper}"
+ENGINE="${TRANSCRIPTION_ENGINE:-}"
 FAST_MODEL_NAME="${FAST_MODEL:-large}"
 DIARIZE_MODEL_NAME="${DIARIZE_MODEL:-large}"
 DOWNLOAD_ALL=false
@@ -52,6 +52,15 @@ fi
 if ! python -c "import huggingface_hub" 2>/dev/null; then
     echo "Installing huggingface_hub..."
     pip install -q huggingface_hub
+fi
+
+# When no engine is explicitly set, defer to transcribe.py's runtime
+# auto-detect so prefetch and runtime never disagree on which engine to
+# target. Avoids prefetching mlx-whisper weights on a machine where
+# runtime would actually use faster-whisper or openai-whisper.
+if [ -z "$ENGINE" ] && [ "$DOWNLOAD_ALL" = "false" ]; then
+    ENGINE=$(python -c "import sys; sys.path.insert(0, '$SCRIPT_DIR'); from transcribe import detect_default_engine; print(detect_default_engine())")
+    echo "Engine auto-detected: $ENGINE"
 fi
 
 export HF_TOKEN="${HF_TOKEN:-}"
