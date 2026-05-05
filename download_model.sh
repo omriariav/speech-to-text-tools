@@ -80,12 +80,15 @@ SKIP_PYANNOTE = os.environ["SKIP_PYANNOTE"] == "true"
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 MLX_REPOS = {
-    "tiny":     "mlx-community/whisper-tiny-mlx",
-    "base":     "mlx-community/whisper-base-mlx",
-    "small":    "mlx-community/whisper-small-mlx",
-    "medium":   "mlx-community/whisper-medium-mlx",
-    "large":    "mlx-community/whisper-large-v3-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "tiny":           "mlx-community/whisper-tiny-mlx",
+    "base":           "mlx-community/whisper-base-mlx",
+    "small":          "mlx-community/whisper-small-mlx",
+    "medium":         "mlx-community/whisper-medium-mlx",
+    "large":          "mlx-community/whisper-large-v3-mlx",
+    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    "large-q4":       "mlx-community/whisper-large-v3-mlx-4bit",
+    "large-turbo":    "mlx-community/whisper-large-v3-turbo",
+    "large-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",
 }
 
 FASTER_REPOS = {

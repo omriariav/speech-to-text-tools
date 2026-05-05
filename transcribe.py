@@ -62,12 +62,18 @@ SPEAKER_LABELS = {
 ENGINES = ("mlx-whisper", "faster-whisper", "openai-whisper")
 
 _MLX_REPOS = {
-    "tiny":     "mlx-community/whisper-tiny-mlx",
-    "base":     "mlx-community/whisper-base-mlx",
-    "small":    "mlx-community/whisper-small-mlx",
-    "medium":   "mlx-community/whisper-medium-mlx",
-    "large":    "mlx-community/whisper-large-v3-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "tiny":           "mlx-community/whisper-tiny-mlx",
+    "base":           "mlx-community/whisper-base-mlx",
+    "small":          "mlx-community/whisper-small-mlx",
+    "medium":         "mlx-community/whisper-medium-mlx",
+    "large":          "mlx-community/whisper-large-v3-mlx",
+    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    # Memory-friendly large-v3 variants. Use these on machines where
+    # plain `large` triggers OOM (M-series with <32GB free, or systems
+    # under load). Quality is near-identical for most content.
+    "large-q4":       "mlx-community/whisper-large-v3-mlx-4bit",   # ~1GB on disk, ~2GB peak
+    "large-turbo":    "mlx-community/whisper-large-v3-turbo",      # distilled, ~3GB, much faster
+    "large-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",   # distilled + quantized, ~800MB
 }
 
 _FASTER_NAMES = {
@@ -822,8 +828,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", "-m",
         default=None,
-        choices=["tiny", "base", "small", "medium", "large", "large-v3"],
-        help="Whisper model to use (required for transcription, omit to only unify existing transcripts)"
+        choices=["tiny", "base", "small", "medium", "large", "large-v3",
+                 "large-q4", "large-turbo", "large-turbo-q4"],
+        help=("Whisper model to use (required for transcription, omit to only "
+              "unify existing transcripts). The large-q4 / large-turbo / "
+              "large-turbo-q4 variants are MLX-only and trade some quality "
+              "for much lower memory.")
     )
     parser.add_argument(
         "--engine", "-e",

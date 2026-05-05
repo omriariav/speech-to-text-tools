@@ -174,6 +174,24 @@ class TestMLXAdapter(unittest.TestCase):
             with self.assertRaises(ValueError):
                 transcribe._transcribe_mlx("/tmp/a.m4a", "huge", "he", False)
 
+    def test_quantized_variants_map_to_correct_repos(self):
+        # Memory-friendly variants are MLX-only and route to specific HF repos.
+        # Verify each maps to its expected repo so users can rely on them
+        # when the full large model OOMs on memory-constrained machines.
+        cases = {
+            "large-q4":       "mlx-community/whisper-large-v3-mlx-4bit",
+            "large-turbo":    "mlx-community/whisper-large-v3-turbo",
+            "large-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",
+        }
+        for size, expected_repo in cases.items():
+            with self.subTest(size=size):
+                fake_mlx = MagicMock()
+                fake_mlx.transcribe.return_value = {"segments": [], "text": ""}
+                with patch.dict(sys.modules, {"mlx_whisper": fake_mlx}):
+                    transcribe._transcribe_mlx("/tmp/a.m4a", size, "he", False)
+                kwargs = fake_mlx.transcribe.call_args.kwargs
+                self.assertEqual(kwargs["path_or_hf_repo"], expected_repo)
+
     def test_missing_package_gives_actionable_error(self):
         with patch.dict(sys.modules, {"mlx_whisper": None}):
             with self.assertRaises(RuntimeError) as ctx:
