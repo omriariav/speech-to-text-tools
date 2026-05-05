@@ -51,8 +51,17 @@ python transcribe.py meeting.m4a --model medium --lang he --diarize
 python transcribe.py meeting.m4a --model medium --diarize --timestamps
 ```
 
-Models: tiny, base, small, medium (default), large
+Models: tiny, base, small, medium, large, large-v3 (default for single file: large)
 Default language: Hebrew (he)
+
+**Engines** (via `--engine` or `TRANSCRIPTION_ENGINE` env var):
+- `mlx-whisper` — Apple Silicon, fastest (requires `pip install mlx-whisper`)
+- `faster-whisper` — cross-platform, fast (requires `pip install faster-whisper`)
+- `openai-whisper` — original CPU path, always available
+
+When `--engine` is omitted, transcribe.py auto-detects: MLX on Apple Silicon
+when installed, else faster-whisper, else openai-whisper. Pre-fetch model
+weights with `./download_model.sh` to avoid first-run download latency.
 
 **Diarization output format:**
 - English: `Speaker 1: Hello...`
@@ -104,7 +113,18 @@ See AUTOMATOR_SETUP_INSTRUCTIONS.md for setup details.
 ## Architecture Notes
 
 - All scripts use argparse for CLI arguments
-- Whisper runs on CPU with fp16=False for compatibility
+- Pluggable engine layer (mlx-whisper / faster-whisper / openai-whisper) behind
+  a unified `transcribe_audio(engine, ...)` dispatcher in transcribe.py
 - transcribe.py uses threaded animated progress during transcription
 - Existing output files are skipped unless --force is specified
 - Transcripts saved as .txt with same base name as input
+
+## Testing
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests cover engine dispatch, model-name mapping, output normalization, and
+diarization alignment. They mock the underlying ML libraries — no real model
+inference, runs in milliseconds.
