@@ -36,12 +36,12 @@ class TestDetectDefaultEngine(unittest.TestCase):
     def test_apple_silicon_without_mlx_falls_back_to_faster(self, mock_platform):
         mock_platform.system.return_value = "Darwin"
         mock_platform.machine.return_value = "arm64"
-        sys.modules.pop("mlx_whisper", None)
-        sys.modules["faster_whisper"] = MagicMock()
-        try:
+        # Setting sys.modules[X] = None actively blocks `import X` (raises
+        # ImportError); merely popping the key would let a real installed
+        # package re-import successfully and break this test on dev
+        # machines that actually have mlx-whisper.
+        with patch.dict(sys.modules, {"mlx_whisper": None, "faster_whisper": MagicMock()}):
             self.assertEqual(transcribe.detect_default_engine(), "faster-whisper")
-        finally:
-            sys.modules.pop("faster_whisper", None)
 
     @patch("transcribe.platform")
     def test_intel_mac_skips_mlx(self, mock_platform):

@@ -12,10 +12,15 @@
 set -e              # Exit on error
 set -o pipefail     # Surface failures from python through `tee` pipes
 
-# Load environment configuration
+# Load environment configuration. `set -a` auto-exports every variable
+# defined in .env so child processes (transcribe.py, video_converter.py)
+# inherit them — notably HF_TOKEN for Pyannote diarization, which would
+# otherwise be a shell-local variable invisible to python.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
     source "$SCRIPT_DIR/.env"
+    set +a
 else
     echo "ERROR: .env file not found. Copy .env.example to .env and configure it."
     exit 1
@@ -29,12 +34,10 @@ for var in TOOLS_DIR VENV_DIR OUTPUT_DIR LOG_FILE; do
     fi
 done
 
-# Engine selection — defaults to transcribe.py's auto-detect when unset.
-# Export so child python processes pick it up via TRANSCRIPTION_ENGINE.
-TRANSCRIPTION_ENGINE="${TRANSCRIPTION_ENGINE:-}"
-export TRANSCRIPTION_ENGINE
+# Engine selection — empty/unset triggers transcribe.py's auto-detect.
+# `set -a` above already exported TRANSCRIPTION_ENGINE if .env defined it.
 ENGINE_FLAG=()
-if [ -n "$TRANSCRIPTION_ENGINE" ]; then
+if [ -n "${TRANSCRIPTION_ENGINE:-}" ]; then
     ENGINE_FLAG=(--engine "$TRANSCRIPTION_ENGINE")
 fi
 
