@@ -9,7 +9,8 @@
 # Usage: auto_transcribe_meet.sh /path/to/video_or_audio
 #
 
-set -e  # Exit on error
+set -e              # Exit on error
+set -o pipefail     # Surface failures from python through `tee` pipes
 
 # Load environment configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +28,15 @@ for var in TOOLS_DIR VENV_DIR OUTPUT_DIR LOG_FILE; do
         exit 1
     fi
 done
+
+# Engine selection — defaults to transcribe.py's auto-detect when unset.
+# Export so child python processes pick it up via TRANSCRIPTION_ENGINE.
+TRANSCRIPTION_ENGINE="${TRANSCRIPTION_ENGINE:-}"
+export TRANSCRIPTION_ENGINE
+ENGINE_FLAG=()
+if [ -n "$TRANSCRIPTION_ENGINE" ]; then
+    ENGINE_FLAG=(--engine "$TRANSCRIPTION_ENGINE")
+fi
 
 # Ensure output directory exists before first log call
 mkdir -p "$OUTPUT_DIR"
@@ -93,6 +103,13 @@ source "$VENV_DIR/bin/activate"
 # Add ffmpeg to PATH (Automator doesn't have Homebrew paths)
 export PATH="/opt/homebrew/bin:$PATH"
 
+# Log engine selection (auto-detect when unset)
+if [ -n "$TRANSCRIPTION_ENGINE" ]; then
+    log "Engine: $TRANSCRIPTION_ENGINE"
+else
+    log "Engine: auto-detect (transcribe.py picks best available)"
+fi
+
 # Step 1: Get M4A audio file (convert if needed)
 if [ -f "$M4A_FILE" ]; then
     log "Audio file already exists: $M4A_FILE"
@@ -138,8 +155,9 @@ if [ "$ENABLE_FAST" = true ]; then
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
             --model "$FAST_MODEL" \
+            "${ENGINE_FLAG[@]}" \
             --lang he \
-            --output "$FAST_HE"
+            --output "$FAST_HE" 2>&1 | tee -a "$LOG_FILE"
         log "Fast Hebrew transcript saved: $FAST_HE"
     fi
 
@@ -150,8 +168,9 @@ if [ "$ENABLE_FAST" = true ]; then
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
             --model "$FAST_MODEL" \
+            "${ENGINE_FLAG[@]}" \
             --lang en \
-            --output "$FAST_EN"
+            --output "$FAST_EN" 2>&1 | tee -a "$LOG_FILE"
         log "Fast English transcript saved: $FAST_EN"
     fi
 fi
@@ -167,9 +186,10 @@ if [ "$ENABLE_DIARIZATION" = true ]; then
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
             --model "$DIARIZE_MODEL" \
+            "${ENGINE_FLAG[@]}" \
             --lang he \
             --diarize \
-            --output "$DIARIZED_HE"
+            --output "$DIARIZED_HE" 2>&1 | tee -a "$LOG_FILE"
         log "Diarized Hebrew transcript saved: $DIARIZED_HE"
     fi
 
@@ -180,9 +200,10 @@ if [ "$ENABLE_DIARIZATION" = true ]; then
         python3 "$TOOLS_DIR/transcribe.py" \
             "$M4A_FILE" \
             --model "$DIARIZE_MODEL" \
+            "${ENGINE_FLAG[@]}" \
             --lang en \
             --diarize \
-            --output "$DIARIZED_EN"
+            --output "$DIARIZED_EN" 2>&1 | tee -a "$LOG_FILE"
         log "Diarized English transcript saved: $DIARIZED_EN"
     fi
 fi
