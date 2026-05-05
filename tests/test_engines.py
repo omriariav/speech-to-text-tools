@@ -253,5 +253,49 @@ class TestFasterWhisperAdapter(unittest.TestCase):
         self.assertIn("faster-whisper", str(ctx.exception))
 
 
+class TestResolveHFToken(unittest.TestCase):
+    def setUp(self):
+        # Use a tempdir-based fake HOME so we never read/write real cache
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        self.fake_cached = os.path.join(self.tmpdir, "token")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_env_token_takes_precedence(self):
+        # Even with cached file present, explicit env value wins
+        with open(self.fake_cached, "w") as f:
+            f.write("hf_cachedXXX")
+        token, source = transcribe.resolve_hf_token("hf_envYYY", cached_path=self.fake_cached)
+        self.assertEqual(token, "hf_envYYY")
+        self.assertEqual(source, "env")
+
+    def test_falls_back_to_cached_login(self):
+        # Empty env, cached file present → return None (let huggingface_hub
+        # use its own cached creds) and signal the source via label
+        with open(self.fake_cached, "w") as f:
+            f.write("hf_cached")
+        token, source = transcribe.resolve_hf_token("", cached_path=self.fake_cached)
+        self.assertIsNone(token)
+        self.assertEqual(source, "cached-cli-login")
+
+    def test_neither_raises_with_actionable_message(self):
+        # Empty env, no cached file → raise so caller can print help
+        token_path = os.path.join(self.tmpdir, "does-not-exist")
+        with self.assertRaises(FileNotFoundError) as ctx:
+            transcribe.resolve_hf_token("", cached_path=token_path)
+        msg = str(ctx.exception)
+        self.assertIn("HF_TOKEN", msg)
+        self.assertIn("huggingface-cli login", msg)
+
+    def test_none_env_token_treated_as_empty(self):
+        # Defensive: callers may pass None instead of "" when env var unset
+        token_path = os.path.join(self.tmpdir, "missing")
+        with self.assertRaises(FileNotFoundError):
+            transcribe.resolve_hf_token(None, cached_path=token_path)
+
+
 if __name__ == "__main__":
     unittest.main()

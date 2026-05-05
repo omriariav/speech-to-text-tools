@@ -83,6 +83,29 @@ _OPENAI_NAMES = {
 _MODEL_CACHE = {}
 
 
+def resolve_hf_token(env_token: str, cached_path: str = "~/.cache/huggingface/token"):
+    """Pick the right HuggingFace token source for gated model access.
+
+    Resolution order:
+      1. `env_token` if non-empty (typically `os.environ["HF_TOKEN"]`)
+      2. Cached `huggingface-cli login` at `cached_path` — return None so
+         `huggingface_hub` falls back to its own cached credential.
+      3. Raise FileNotFoundError if neither is available.
+
+    Returns:
+        (token_or_None, source_label). `token=None` means "let
+        huggingface_hub handle it via cached login."
+    """
+    if env_token:
+        return env_token, "env"
+    if os.path.exists(os.path.expanduser(cached_path)):
+        return None, "cached-cli-login"
+    raise FileNotFoundError(
+        "No HF_TOKEN env var and no cached huggingface-cli login. "
+        "Either set HF_TOKEN in .env or run `huggingface-cli login`."
+    )
+
+
 def detect_default_engine() -> str:
     """Pick the fastest available engine on this machine.
 

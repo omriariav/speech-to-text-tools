@@ -55,6 +55,7 @@ if ! python -c "import huggingface_hub" 2>/dev/null; then
 fi
 
 export HF_TOKEN="${HF_TOKEN:-}"
+export SCRIPT_DIR
 export ENGINE FAST_MODEL_NAME DIARIZE_MODEL_NAME DOWNLOAD_ALL SKIP_PYANNOTE
 
 python <<'PYEOF'
@@ -153,20 +154,27 @@ for eng, size in targets:
 
 if not SKIP_PYANNOTE:
     print(f"\n[pyannote / speaker-diarization-3.1]")
-    if not HF_TOKEN:
-        print("  ⚠️  HF_TOKEN not set — skipping Pyannote download.")
-        print("     Pyannote models are gated. Set HF_TOKEN in .env or shell,")
-        print("     accept the model terms at:")
+    # Reuse the same token-resolution logic transcribe.py uses at runtime
+    # so prefetch behavior and runtime behavior stay in sync.
+    sys.path.insert(0, os.environ.get("SCRIPT_DIR", ""))
+    from transcribe import resolve_hf_token
+    try:
+        token_arg, source = resolve_hf_token(HF_TOKEN or "")
+    except FileNotFoundError as e:
+        print(f"  ⚠️  {e}")
+        print("     Accept Pyannote model terms at:")
         print("     https://huggingface.co/pyannote/speaker-diarization-3.1")
-    else:
-        try:
-            snapshot_download(repo_id="pyannote/speaker-diarization-3.1", token=HF_TOKEN)
-            snapshot_download(repo_id="pyannote/segmentation-3.0", token=HF_TOKEN)
-            print("  ✓ Pyannote models cached")
-        except Exception as e:
-            print(f"  ❌ Pyannote download failed: {e}")
-            print("     Make sure you've accepted model terms on HuggingFace")
-            sys.exit(1)
+        sys.exit(0)
+    if source == "cached-cli-login":
+        print("  → using cached huggingface-cli login")
+    try:
+        snapshot_download(repo_id="pyannote/speaker-diarization-3.1", token=token_arg)
+        snapshot_download(repo_id="pyannote/segmentation-3.0", token=token_arg)
+        print("  ✓ Pyannote models cached")
+    except Exception as e:
+        print(f"  ❌ Pyannote download failed: {e}")
+        print("     Make sure you've accepted model terms on HuggingFace")
+        sys.exit(1)
 
 print("\n✅ Done.")
 PYEOF
