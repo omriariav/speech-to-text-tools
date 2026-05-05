@@ -70,27 +70,30 @@ SKIP_PYANNOTE = os.environ["SKIP_PYANNOTE"] == "true"
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 MLX_REPOS = {
-    "tiny":   "mlx-community/whisper-tiny-mlx",
-    "base":   "mlx-community/whisper-base-mlx",
-    "small":  "mlx-community/whisper-small-mlx",
-    "medium": "mlx-community/whisper-medium-mlx",
-    "large":  "mlx-community/whisper-large-v3-mlx",
+    "tiny":     "mlx-community/whisper-tiny-mlx",
+    "base":     "mlx-community/whisper-base-mlx",
+    "small":    "mlx-community/whisper-small-mlx",
+    "medium":   "mlx-community/whisper-medium-mlx",
+    "large":    "mlx-community/whisper-large-v3-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
 }
 
 FASTER_REPOS = {
-    "tiny":   "Systran/faster-whisper-tiny",
-    "base":   "Systran/faster-whisper-base",
-    "small":  "Systran/faster-whisper-small",
-    "medium": "Systran/faster-whisper-medium",
-    "large":  "Systran/faster-whisper-large-v3",
+    "tiny":     "Systran/faster-whisper-tiny",
+    "base":     "Systran/faster-whisper-base",
+    "small":    "Systran/faster-whisper-small",
+    "medium":   "Systran/faster-whisper-medium",
+    "large":    "Systran/faster-whisper-large-v3",
+    "large-v3": "Systran/faster-whisper-large-v3",
 }
 
-OPENAI_URLS = {
-    "tiny":   "tiny",
-    "base":   "base",
-    "small":  "small",
-    "medium": "medium",
-    "large":  "large-v3",
+OPENAI_NAMES = {
+    "tiny":     "tiny",
+    "base":     "base",
+    "small":    "small",
+    "medium":   "medium",
+    "large":    "large-v3",
+    "large-v3": "large-v3",
 }
 
 
@@ -107,11 +110,14 @@ def fetch_faster(size):
 
 
 def fetch_openai(size):
-    name = OPENAI_URLS[size]
-    print(f"  → openai-whisper: {name} (lazy load via whisper package)")
+    name = OPENAI_NAMES[size]
+    print(f"  → openai-whisper: {name} (loading triggers download)")
     try:
+        # Use the public load_model API rather than whisper._download /
+        # whisper._MODELS — those are private and have changed between
+        # releases. load_model fetches weights as a side effect.
         import whisper
-        whisper._download(whisper._MODELS[name], os.path.expanduser("~/.cache/whisper"), False)
+        whisper.load_model(name, device="cpu")
     except Exception as e:
         print(f"    ⚠️  could not pre-fetch openai-whisper {name}: {e}")
         print(f"       (will download on first transcribe.py run)")

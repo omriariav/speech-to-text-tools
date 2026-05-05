@@ -84,18 +84,24 @@ _MODEL_CACHE = {}
 
 
 def detect_default_engine() -> str:
-    """Pick the fastest available engine on this machine."""
+    """Pick the fastest available engine on this machine.
+
+    Catches broad Exception (not just ImportError) because optional
+    backends can fail at import time with native-library errors
+    (CTranslate2 ABI mismatch, missing AVX2, etc.) — those should
+    fall through to the next candidate, not abort detection.
+    """
     is_mac_arm = platform.system() == "Darwin" and platform.machine() == "arm64"
     if is_mac_arm:
         try:
             import mlx_whisper  # noqa: F401
             return "mlx-whisper"
-        except ImportError:
+        except Exception:
             pass
     try:
         import faster_whisper  # noqa: F401
         return "faster-whisper"
-    except ImportError:
+    except Exception:
         pass
     return "openai-whisper"
 
@@ -156,7 +162,11 @@ def _transcribe_faster(audio_path, model_name, language, word_timestamps):
     name = _FASTER_NAMES.get(model_name, model_name)
     key = ("faster", name)
     if key not in _MODEL_CACHE:
-        _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="int8")
+        # compute_type="auto" lets CTranslate2 pick the best available
+        # quantization for the host CPU (int8 needs AVX2 on x86_64; on
+        # Apple Silicon int8 works via NEON). Hard-coding int8 would
+        # break on older x86 chips.
+        _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="auto")
     model = _MODEL_CACHE[key]
     segments_iter, _info = model.transcribe(
         audio_path, language=language, word_timestamps=word_timestamps,
@@ -171,7 +181,9 @@ def _transcribe_faster(audio_path, model_name, language, word_timestamps):
             ]
         segments.append(seg_dict)
         text_parts.append(seg.text)
-    return {"segments": segments, "text": "".join(text_parts)}
+    # faster-whisper segments often start with a leading space; strip the
+    # joined result so result["text"] matches openai/mlx behavior.
+    return {"segments": segments, "text": "".join(text_parts).strip()}
 
 
 def load_diarization_pipeline(auth_token: str = None):
@@ -787,7 +799,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--engine", "-e",
-        default=os.environ.get("TRANSCRIPTION_ENGINE"),
+        # `or None` so an empty TRANSCRIPTION_ENGINE="" from the shell is
+        # treated the same as "unset" (falls through to detect_default_engine).
+        default=os.environ.get("TRANSCRIPTION_ENGINE") or None,
         choices=list(ENGINES),
         help=("Transcription engine. Default: auto-detect (mlx-whisper on Apple "
               "Silicon if installed, else faster-whisper, else openai-whisper). "
@@ -831,6 +845,15 @@ if __name__ == "__main__":
         help="HuggingFace token for accessing Pyannote models (or set HF_TOKEN env var)"
     )
     args = parser.parse_args()
+
+    # argparse only validates --engine choices for command-line values, not
+    # for `default=` (which we wired to TRANSCRIPTION_ENGINE env var).
+    # Validate explicitly so a typo in .env fails fast with a clear message.
+    if args.engine and args.engine not in ENGINES:
+        parser.error(
+            f"Invalid TRANSCRIPTION_ENGINE {args.engine!r}. "
+            f"Valid: {', '.join(ENGINES)}"
+        )
 
     # Determine if path is a file or directory
     is_file = os.path.isfile(args.path)
@@ -877,9 +900,9 @@ if __name__ == "__main__":
             engine=args.engine,
         )
     else:  # Directory
-        # If only unifying, pass model=None, otherwise ensure it has a default
-        if args.model:
-            args.model = args.model or "large"
+        # Directory mode: if --model omitted, args.model is None and the
+        # earlier guard already required either --model or --unify, so by
+        # this point None means "unify-only" — keep it None for that case.
 
         # Process the directory
         transcribe_folder(

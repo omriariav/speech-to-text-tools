@@ -66,6 +66,29 @@ class TestDetectDefaultEngine(unittest.TestCase):
         with patch.dict(sys.modules, {"mlx_whisper": None, "faster_whisper": None}):
             self.assertEqual(transcribe.detect_default_engine(), "openai-whisper")
 
+    @patch("transcribe.platform")
+    def test_broken_faster_whisper_native_lib_falls_through(self, mock_platform):
+        # If faster-whisper is installed but its native CTranslate2 lib
+        # raises a non-ImportError at import time, detection should still
+        # gracefully fall through to openai-whisper rather than propagate.
+        mock_platform.system.return_value = "Linux"
+        mock_platform.machine.return_value = "x86_64"
+        broken_loader = MagicMock()
+        broken_loader.__spec__ = None  # presence triggers import path
+        # Simulate a runtime exception during import of faster_whisper
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "faster_whisper":
+                raise RuntimeError("CTranslate2 native lib mismatch")
+            return real_import(name, *args, **kwargs)
+
+        sys.modules.pop("mlx_whisper", None)
+        sys.modules.pop("faster_whisper", None)
+        with patch.object(builtins, "__import__", side_effect=fake_import):
+            self.assertEqual(transcribe.detect_default_engine(), "openai-whisper")
+
 
 class TestTranscribeAudioDispatch(unittest.TestCase):
     def test_unknown_engine_raises(self):
@@ -181,6 +204,28 @@ class TestFasterWhisperAdapter(unittest.TestCase):
         self.assertEqual(len(result["segments"]), 2)
         self.assertEqual(result["segments"][0], {"start": 0.0, "end": 1.5, "text": "hello"})
         self.assertEqual(result["text"], "hello world")
+
+    def test_text_strips_leading_space_from_first_segment(self):
+        # faster-whisper segments commonly start with a leading space; the
+        # joined `text` field should be clean to match openai/mlx behavior.
+        segs = [
+            SimpleNamespace(start=0.0, end=1.0, text=" hello", words=None),
+            SimpleNamespace(start=1.0, end=2.0, text=" world", words=None),
+        ]
+        fake_module, _ = self._make_fake_module(segs)
+        with patch.dict(sys.modules, {"faster_whisper": fake_module}):
+            result = transcribe._transcribe_faster("/tmp/a.m4a", "large", "en", False)
+        self.assertEqual(result["text"], "hello world")
+        self.assertFalse(result["text"].startswith(" "))
+
+    def test_compute_type_is_auto_for_portability(self):
+        # Hard-coded int8 would break on x86_64 CPUs without AVX2.
+        # "auto" lets CTranslate2 pick the best available quantization.
+        fake_module, _ = self._make_fake_module([])
+        with patch.dict(sys.modules, {"faster_whisper": fake_module}):
+            transcribe._transcribe_faster("/tmp/a.m4a", "large", "he", False)
+        kwargs = fake_module.WhisperModel.call_args.kwargs
+        self.assertEqual(kwargs.get("compute_type"), "auto")
 
     def test_word_timestamps_pass_through(self):
         words = [SimpleNamespace(start=0.0, end=0.5, word="hi")]
