@@ -90,6 +90,44 @@ class TestDetectDefaultEngine(unittest.TestCase):
             self.assertEqual(transcribe.detect_default_engine(), "openai-whisper")
 
 
+class TestMLXOnlyModelGuard(unittest.TestCase):
+    """MLX-only model variants must reject non-MLX engines with a clear error
+    rather than letting an opaque 'model not found' bubble up from the
+    underlying library."""
+
+    def test_large_q4_rejected_for_faster_whisper(self):
+        with self.assertRaises(ValueError) as ctx:
+            transcribe.transcribe_audio("faster-whisper", "/tmp/a.m4a", "large-q4", "he")
+        self.assertIn("MLX-only", str(ctx.exception))
+        self.assertIn("mlx-whisper", str(ctx.exception))
+
+    def test_large_turbo_rejected_for_openai_whisper(self):
+        with self.assertRaises(ValueError) as ctx:
+            transcribe.transcribe_audio("openai-whisper", "/tmp/a.m4a", "large-turbo", "en")
+        self.assertIn("MLX-only", str(ctx.exception))
+
+    def test_large_turbo_q4_rejected_for_openai(self):
+        with self.assertRaises(ValueError):
+            transcribe.transcribe_audio("openai-whisper", "/tmp/a.m4a", "large-turbo-q4", "en")
+
+    def test_mlx_only_models_pass_through_to_mlx(self):
+        # Sanity check: the same model names succeed when the engine is mlx
+        with patch.object(transcribe, "_transcribe_mlx") as m:
+            m.return_value = {"segments": [], "text": ""}
+            transcribe.transcribe_audio("mlx-whisper", "/tmp/a.m4a", "large-q4", "he")
+            transcribe.transcribe_audio("mlx-whisper", "/tmp/a.m4a", "large-turbo", "he")
+            transcribe.transcribe_audio("mlx-whisper", "/tmp/a.m4a", "large-turbo-q4", "he")
+        self.assertEqual(m.call_count, 3)
+
+    def test_regular_models_unaffected(self):
+        # Non-quantized model names should pass through to all engines
+        with patch.object(transcribe, "_transcribe_faster") as m:
+            m.return_value = {"segments": [], "text": ""}
+            transcribe.transcribe_audio("faster-whisper", "/tmp/a.m4a", "large", "en")
+            transcribe.transcribe_audio("faster-whisper", "/tmp/a.m4a", "medium", "en")
+        self.assertEqual(m.call_count, 2)
+
+
 class TestTranscribeAudioDispatch(unittest.TestCase):
     def test_unknown_engine_raises(self):
         with self.assertRaises(ValueError):
@@ -329,6 +367,59 @@ class TestLoadDiarizationPipelineTokenHandling(unittest.TestCase):
     def test_unset_env_token_is_none(self):
         token = self._invoke_with_env_token(None)
         self.assertIsNone(token)
+
+    def test_torch_load_is_restored_after_pipeline_load(self):
+        """The weights_only=False monkeypatch must be reverted so it
+        doesn't leak to other torch.load callers in the same process."""
+        import types
+        original_load = MagicMock(name="original_torch_load")
+        fake_torch = types.SimpleNamespace(
+            load=original_load,
+            device=MagicMock(return_value="cpu"),
+        )
+        fake_pipeline_class = MagicMock()
+        fake_pipeline_class.from_pretrained = MagicMock(return_value=MagicMock())
+        fake_pyannote_audio = MagicMock()
+        fake_pyannote_audio.Pipeline = fake_pipeline_class
+
+        with patch.dict(sys.modules, {
+            "pyannote": MagicMock(),
+            "pyannote.audio": fake_pyannote_audio,
+            "torch": fake_torch,
+        }):
+            transcribe.load_diarization_pipeline(auth_token="hf_x")
+
+        # After the call, torch.load must point back to the original
+        self.assertIs(fake_torch.load, original_load,
+            "torch.load was not restored — leaving the patch in place forces "
+            "weights_only=False on every subsequent torch.load call in the "
+            "process, which is a security regression for library callers.")
+
+    def test_torch_load_restored_even_on_exception(self):
+        """Restoration must happen on the error path too (try/finally)."""
+        import types
+        original_load = MagicMock(name="original_torch_load")
+        fake_torch = types.SimpleNamespace(
+            load=original_load,
+            device=MagicMock(return_value="cpu"),
+        )
+        fake_pipeline_class = MagicMock()
+        fake_pipeline_class.from_pretrained = MagicMock(
+            side_effect=RuntimeError("simulated pyannote load failure")
+        )
+        fake_pyannote_audio = MagicMock()
+        fake_pyannote_audio.Pipeline = fake_pipeline_class
+
+        with patch.dict(sys.modules, {
+            "pyannote": MagicMock(),
+            "pyannote.audio": fake_pyannote_audio,
+            "torch": fake_torch,
+        }):
+            with self.assertRaises(RuntimeError):
+                transcribe.load_diarization_pipeline(auth_token="hf_x")
+
+        self.assertIs(fake_torch.load, original_load,
+            "torch.load must be restored even when pipeline load fails")
 
 
 class TestResolveHFToken(unittest.TestCase):

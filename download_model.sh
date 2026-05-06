@@ -70,7 +70,7 @@ export ENGINE FAST_MODEL_NAME DIARIZE_MODEL_NAME DOWNLOAD_ALL SKIP_PYANNOTE
 python <<'PYEOF'
 import os
 import sys
-from huggingface_hub import snapshot_download, hf_hub_download
+from huggingface_hub import snapshot_download
 
 ENGINE = os.environ["ENGINE"]
 FAST = os.environ["FAST_MODEL_NAME"]

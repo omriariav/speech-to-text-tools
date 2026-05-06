@@ -95,7 +95,26 @@ _OPENAI_NAMES = {
     "large": "large-v3", "large-v3": "large-v3",
 }
 
+# Module-level cache: fine for one-shot CLI use (the auto_transcribe_meet.sh
+# pattern of one subprocess per pass). Callers importing this as a library
+# and switching models frequently across many files should be aware there
+# is no eviction policy here.
 _MODEL_CACHE = {}
+
+# Model name aliases that only exist in the MLX repo set. Passing these
+# to faster-whisper or openai-whisper would surface as opaque "model not
+# found" errors from the underlying library — guard them at the dispatch
+# boundary with a clear message.
+_MLX_ONLY_MODELS = {"large-q4", "large-turbo", "large-turbo-q4"}
+
+
+def _require_mlx_only(engine: str, model_name: str) -> None:
+    if model_name in _MLX_ONLY_MODELS and engine != "mlx-whisper":
+        raise ValueError(
+            f"Model {model_name!r} is MLX-only and not available for "
+            f"engine {engine!r}. Use --engine mlx-whisper, or pick a "
+            f"non-quantized model name (large, large-v3, medium, ...)."
+        )
 
 
 def resolve_hf_token(env_token: str, cached_path: str = "~/.cache/huggingface/token"):
@@ -147,6 +166,7 @@ def detect_default_engine() -> str:
 def transcribe_audio(engine: str, audio_path: str, model_name: str,
                      language: str, word_timestamps: bool = False) -> dict:
     """Engine-agnostic transcription. Returns {'segments': [...], 'text': str}."""
+    _require_mlx_only(engine, model_name)
     if engine == "openai-whisper":
         return _transcribe_openai(audio_path, model_name, language, word_timestamps)
     if engine == "mlx-whisper":
@@ -239,14 +259,18 @@ def load_diarization_pipeline(auth_token: str = None):
     """
     import torch
 
-    # Fix for PyTorch 2.6+ compatibility with pyannote models
-    # The models were saved with older PyTorch and need weights_only=False
-    # Monkeypatch torch.load to use weights_only=False for pyannote compatibility
+    # Fix for PyTorch 2.6+ compatibility with pyannote models: pyannote's
+    # weights were saved with an older torch and need weights_only=False
+    # to load. We monkeypatch torch.load only for the duration of the
+    # Pipeline.from_pretrained call, then restore — leaving the patch in
+    # place would force weights_only=False on every torch.load call in
+    # the process for the rest of its lifetime, which is a security
+    # regression (arbitrary pickle execution allowed for any caller).
     _original_torch_load = torch.load
+
     def _patched_torch_load(*args, **kwargs):
         kwargs['weights_only'] = False
         return _original_torch_load(*args, **kwargs)
-    torch.load = _patched_torch_load
 
     from pyannote.audio import Pipeline
 
@@ -257,6 +281,7 @@ def load_diarization_pipeline(auth_token: str = None):
     # with an empty token instead of falling back to the cached CLI login.
     token = auth_token or os.environ.get("HF_TOKEN") or None
 
+    torch.load = _patched_torch_load
     try:
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
@@ -274,6 +299,8 @@ def load_diarization_pipeline(auth_token: str = None):
                 "See README for detailed setup instructions."
             ) from e
         raise
+    finally:
+        torch.load = _original_torch_load
 
 
 def align_whisper_with_diarization(whisper_segments, diarization):
