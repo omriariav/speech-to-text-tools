@@ -837,18 +837,28 @@ def transcribe_folder(folder: str, model_name: str, language: str, print_to_scre
         print(f"   Files sorted in {sort_direction} order by filename.")
 
 def show_animated_progress(filename, stop_event):
-    """Shows an animated progress indicator while Whisper is processing."""
+    """Shows an animated progress indicator while Whisper is processing.
+
+    Skipped entirely when stdout isn't a TTY (e.g. Automator-triggered
+    runs piped through tee to a logfile). Otherwise the spinner ticks
+    every 100ms and writes thousands of lines into the log per run.
+    """
+    if not sys.stdout.isatty():
+        # Just block until done; no animation, no log noise.
+        stop_event.wait()
+        return
+
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     i = 0
     start_time = time.time()
-    
+
     while not stop_event.is_set():
         elapsed = time.time() - start_time
         sys.stdout.write(f"\r{spinner[i]} Transcribing {filename}... ({elapsed:.1f}s elapsed)")
         sys.stdout.flush()
         time.sleep(0.1)
         i = (i + 1) % len(spinner)
-    
+
     # Clear the line when done
     sys.stdout.write("\r" + " " * 80 + "\r")
     sys.stdout.flush()

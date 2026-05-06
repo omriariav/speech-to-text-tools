@@ -122,17 +122,16 @@ elif [[ "$INPUT_FILE" =~ \.[mM]4[aA]$ ]]; then
     cp "$INPUT_FILE" "$M4A_FILE"
     log "Audio copied: $M4A_FILE"
 else
-    # Convert video to M4A
+    # Convert video to M4A. Stderr lands in the log so real failures
+    # surface, but stdout (tqdm progress bars, etc.) is dropped — those
+    # are noisy and not useful in a long-lived log file.
     log "Converting video to M4A..."
-    CONVERSION_OUTPUT=$(python3 "$TOOLS_DIR/video_converter.py" \
+    python3 "$TOOLS_DIR/video_converter.py" \
         "$INPUT_FILE" \
         --output "$OUTPUT_DIR" \
         --format m4a \
-        --bitrate 192k 2>&1)
+        --bitrate 192k >/dev/null 2>>"$LOG_FILE"
     CONVERSION_STATUS=$?
-
-    # Log the conversion output
-    echo "$CONVERSION_OUTPUT" | tee -a "$LOG_FILE"
 
     # Rename the output to our timestamped format
     # video_converter.py keeps original filename (with spaces), not sanitized
@@ -160,7 +159,7 @@ if [ "$ENABLE_FAST" = true ]; then
             --model "$FAST_MODEL" \
             "${ENGINE_FLAG[@]}" \
             --lang he \
-            --output "$FAST_HE" 2>&1 | tee -a "$LOG_FILE"
+            --output "$FAST_HE" >/dev/null 2>>"$LOG_FILE"
         log "Fast Hebrew transcript saved: $FAST_HE"
     fi
 
@@ -173,7 +172,7 @@ if [ "$ENABLE_FAST" = true ]; then
             --model "$FAST_MODEL" \
             "${ENGINE_FLAG[@]}" \
             --lang en \
-            --output "$FAST_EN" 2>&1 | tee -a "$LOG_FILE"
+            --output "$FAST_EN" >/dev/null 2>>"$LOG_FILE"
         log "Fast English transcript saved: $FAST_EN"
     fi
 fi
@@ -192,7 +191,7 @@ if [ "$ENABLE_DIARIZATION" = true ]; then
             "${ENGINE_FLAG[@]}" \
             --lang he \
             --diarize \
-            --output "$DIARIZED_HE" 2>&1 | tee -a "$LOG_FILE"
+            --output "$DIARIZED_HE" >/dev/null 2>>"$LOG_FILE"
         log "Diarized Hebrew transcript saved: $DIARIZED_HE"
     fi
 
@@ -206,7 +205,7 @@ if [ "$ENABLE_DIARIZATION" = true ]; then
             "${ENGINE_FLAG[@]}" \
             --lang en \
             --diarize \
-            --output "$DIARIZED_EN" 2>&1 | tee -a "$LOG_FILE"
+            --output "$DIARIZED_EN" >/dev/null 2>>"$LOG_FILE"
         log "Diarized English transcript saved: $DIARIZED_EN"
     fi
 fi
