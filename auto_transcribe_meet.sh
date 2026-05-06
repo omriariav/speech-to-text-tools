@@ -41,6 +41,21 @@ if [ -n "${TRANSCRIPTION_ENGINE:-}" ]; then
     ENGINE_FLAG=(--engine "$TRANSCRIPTION_ENGINE")
 fi
 
+# Language(s) to transcribe: "he", "en", or "both". Defaults to "he"
+# since most meetings are Hebrew and the English pass on Hebrew audio
+# produces garbage while ~doubling runtime. Override per-recording by
+# editing .env or passing TRANSCRIPT_LANGS=en/both inline.
+TRANSCRIPT_LANGS="${TRANSCRIPT_LANGS:-he}"
+case "$TRANSCRIPT_LANGS" in
+    he)   DO_HE=true;  DO_EN=false ;;
+    en)   DO_HE=false; DO_EN=true  ;;
+    both) DO_HE=true;  DO_EN=true  ;;
+    *)
+        echo "ERROR: TRANSCRIPT_LANGS must be 'he', 'en', or 'both' (got: '$TRANSCRIPT_LANGS')" >&2
+        exit 1
+        ;;
+esac
+
 # Ensure output directory exists before first log call
 mkdir -p "$OUTPUT_DIR"
 
@@ -148,65 +163,73 @@ fi
 
 # Step 2: Fast transcription (Whisper only, no diarization)
 if [ "$ENABLE_FAST" = true ]; then
-    log "--- Fast transcription (model: $FAST_MODEL) ---"
+    log "--- Fast transcription (model: $FAST_MODEL, langs: $TRANSCRIPT_LANGS) ---"
 
-    if [ -f "$FAST_HE" ]; then
-        log "Fast Hebrew transcript already exists: $FAST_HE"
-    else
-        log "Fast transcribing in Hebrew..."
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$FAST_MODEL" \
-            "${ENGINE_FLAG[@]}" \
-            --lang he \
-            --output "$FAST_HE" >/dev/null 2>>"$LOG_FILE"
-        log "Fast Hebrew transcript saved: $FAST_HE"
+    if [ "$DO_HE" = true ]; then
+        if [ -f "$FAST_HE" ]; then
+            log "Fast Hebrew transcript already exists: $FAST_HE"
+        else
+            log "Fast transcribing in Hebrew..."
+            python3 "$TOOLS_DIR/transcribe.py" \
+                "$M4A_FILE" \
+                --model "$FAST_MODEL" \
+                "${ENGINE_FLAG[@]}" \
+                --lang he \
+                --output "$FAST_HE" >/dev/null 2>>"$LOG_FILE"
+            log "Fast Hebrew transcript saved: $FAST_HE"
+        fi
     fi
 
-    if [ -f "$FAST_EN" ]; then
-        log "Fast English transcript already exists: $FAST_EN"
-    else
-        log "Fast transcribing in English..."
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$FAST_MODEL" \
-            "${ENGINE_FLAG[@]}" \
-            --lang en \
-            --output "$FAST_EN" >/dev/null 2>>"$LOG_FILE"
-        log "Fast English transcript saved: $FAST_EN"
+    if [ "$DO_EN" = true ]; then
+        if [ -f "$FAST_EN" ]; then
+            log "Fast English transcript already exists: $FAST_EN"
+        else
+            log "Fast transcribing in English..."
+            python3 "$TOOLS_DIR/transcribe.py" \
+                "$M4A_FILE" \
+                --model "$FAST_MODEL" \
+                "${ENGINE_FLAG[@]}" \
+                --lang en \
+                --output "$FAST_EN" >/dev/null 2>>"$LOG_FILE"
+            log "Fast English transcript saved: $FAST_EN"
+        fi
     fi
 fi
 
 # Step 3: Diarized transcription (Whisper + Pyannote speaker identification)
 if [ "$ENABLE_DIARIZATION" = true ]; then
-    log "--- Diarized transcription (model: $DIARIZE_MODEL) ---"
+    log "--- Diarized transcription (model: $DIARIZE_MODEL, langs: $TRANSCRIPT_LANGS) ---"
 
-    if [ -f "$DIARIZED_HE" ]; then
-        log "Diarized Hebrew transcript already exists: $DIARIZED_HE"
-    else
-        log "Diarized transcribing in Hebrew..."
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$DIARIZE_MODEL" \
-            "${ENGINE_FLAG[@]}" \
-            --lang he \
-            --diarize \
-            --output "$DIARIZED_HE" >/dev/null 2>>"$LOG_FILE"
-        log "Diarized Hebrew transcript saved: $DIARIZED_HE"
+    if [ "$DO_HE" = true ]; then
+        if [ -f "$DIARIZED_HE" ]; then
+            log "Diarized Hebrew transcript already exists: $DIARIZED_HE"
+        else
+            log "Diarized transcribing in Hebrew..."
+            python3 "$TOOLS_DIR/transcribe.py" \
+                "$M4A_FILE" \
+                --model "$DIARIZE_MODEL" \
+                "${ENGINE_FLAG[@]}" \
+                --lang he \
+                --diarize \
+                --output "$DIARIZED_HE" >/dev/null 2>>"$LOG_FILE"
+            log "Diarized Hebrew transcript saved: $DIARIZED_HE"
+        fi
     fi
 
-    if [ -f "$DIARIZED_EN" ]; then
-        log "Diarized English transcript already exists: $DIARIZED_EN"
-    else
-        log "Diarized transcribing in English..."
-        python3 "$TOOLS_DIR/transcribe.py" \
-            "$M4A_FILE" \
-            --model "$DIARIZE_MODEL" \
-            "${ENGINE_FLAG[@]}" \
-            --lang en \
-            --diarize \
-            --output "$DIARIZED_EN" >/dev/null 2>>"$LOG_FILE"
-        log "Diarized English transcript saved: $DIARIZED_EN"
+    if [ "$DO_EN" = true ]; then
+        if [ -f "$DIARIZED_EN" ]; then
+            log "Diarized English transcript already exists: $DIARIZED_EN"
+        else
+            log "Diarized transcribing in English..."
+            python3 "$TOOLS_DIR/transcribe.py" \
+                "$M4A_FILE" \
+                --model "$DIARIZE_MODEL" \
+                "${ENGINE_FLAG[@]}" \
+                --lang en \
+                --diarize \
+                --output "$DIARIZED_EN" >/dev/null 2>>"$LOG_FILE"
+            log "Diarized English transcript saved: $DIARIZED_EN"
+        fi
     fi
 fi
 
@@ -214,12 +237,13 @@ log "=========================================="
 log "Auto-transcription completed successfully!"
 log "  Fast transcription: $([ "$ENABLE_FAST" = true ] && echo "ENABLED ($FAST_MODEL)" || echo "DISABLED")"
 log "  Diarization: $([ "$ENABLE_DIARIZATION" = true ] && echo "ENABLED ($DIARIZE_MODEL)" || echo "DISABLED")"
+log "  Languages: $TRANSCRIPT_LANGS"
 log "Output files:"
 log "  - Audio: $M4A_FILE"
-[ "$ENABLE_FAST" = true ] && log "  - Hebrew (fast): $FAST_HE"
-[ "$ENABLE_FAST" = true ] && log "  - English (fast): $FAST_EN"
-[ "$ENABLE_DIARIZATION" = true ] && log "  - Hebrew (diarized): $DIARIZED_HE"
-[ "$ENABLE_DIARIZATION" = true ] && log "  - English (diarized): $DIARIZED_EN"
+[ "$ENABLE_FAST" = true ] && [ "$DO_HE" = true ] && log "  - Hebrew (fast): $FAST_HE"
+[ "$ENABLE_FAST" = true ] && [ "$DO_EN" = true ] && log "  - English (fast): $FAST_EN"
+[ "$ENABLE_DIARIZATION" = true ] && [ "$DO_HE" = true ] && log "  - Hebrew (diarized): $DIARIZED_HE"
+[ "$ENABLE_DIARIZATION" = true ] && [ "$DO_EN" = true ] && log "  - English (diarized): $DIARIZED_EN"
 log "=========================================="
 
 # Deactivate virtual environment
