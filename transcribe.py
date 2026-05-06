@@ -26,15 +26,24 @@ Usage:
     python transcribe.py /path/to/audio_folder \
         --unify desc
 """
-# Suppress known deprecation warnings from dependencies
+# Suppress known deprecation warnings from dependencies. pyannote.audio
+# calls into torchaudio internals that PyTorch is migrating to TorchCodec;
+# the warnings are emitted on every audio file pyannote processes (dozens
+# per diarization run) and are not actionable from this repo's side.
 import warnings
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
-warnings.filterwarnings("ignore", message="torchaudio._backend.list_audio_backends has been deprecated")
 warnings.filterwarnings("ignore", message="Module 'speechbrain.pretrained' was deprecated")
+# torchaudio → TorchCodec migration noise (PyTorch issue #3902)
+warnings.filterwarnings("ignore", category=UserWarning, module=r"torchaudio\..*")
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio\..*")
+warnings.filterwarnings("ignore", message=r".*torchaudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=r".*TorchAudio.*maintenance phase.*")
+warnings.filterwarnings("ignore", message=r".*load_with_torchcodec.*")
+warnings.filterwarnings("ignore", message=r".*AudioMetaData has been deprecated.*")
 
 import os
 import argparse
-import whisper
+import platform
 from tqdm import tqdm
 import time
 import sys
@@ -52,6 +61,188 @@ SPEAKER_LABELS = {
     "ru": "Спикер",    # Russian
 }
 
+# ---------------------------------------------------------------------------
+# Pluggable transcription engines
+# ---------------------------------------------------------------------------
+# Three backends produce the same {"segments": [...], "text": ...} shape so the
+# rest of this module (diarization alignment, output formatting) is engine-
+# agnostic. Pick via --engine or TRANSCRIPTION_ENGINE env var.
+
+ENGINES = ("mlx-whisper", "faster-whisper", "openai-whisper")
+
+_MLX_REPOS = {
+    "tiny":           "mlx-community/whisper-tiny-mlx",
+    "base":           "mlx-community/whisper-base-mlx",
+    "small":          "mlx-community/whisper-small-mlx",
+    "medium":         "mlx-community/whisper-medium-mlx",
+    "large":          "mlx-community/whisper-large-v3-mlx",
+    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    # Memory-friendly large-v3 variants. Use these on machines where
+    # plain `large` triggers OOM (M-series with <32GB free, or systems
+    # under load). Quality is near-identical for most content.
+    "large-q4":       "mlx-community/whisper-large-v3-mlx-4bit",   # ~1GB on disk, ~2GB peak
+    "large-turbo":    "mlx-community/whisper-large-v3-turbo",      # distilled, ~3GB, much faster
+    "large-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",   # distilled + quantized, ~800MB
+}
+
+_FASTER_NAMES = {
+    "tiny": "tiny", "base": "base", "small": "small", "medium": "medium",
+    "large": "large-v3", "large-v3": "large-v3",
+}
+
+_OPENAI_NAMES = {
+    "tiny": "tiny", "base": "base", "small": "small", "medium": "medium",
+    "large": "large-v3", "large-v3": "large-v3",
+}
+
+# Module-level cache: fine for one-shot CLI use (the auto_transcribe_meet.sh
+# pattern of one subprocess per pass). Callers importing this as a library
+# and switching models frequently across many files should be aware there
+# is no eviction policy here.
+_MODEL_CACHE = {}
+
+# Model name aliases that only exist in the MLX repo set. Passing these
+# to faster-whisper or openai-whisper would surface as opaque "model not
+# found" errors from the underlying library — guard them at the dispatch
+# boundary with a clear message.
+_MLX_ONLY_MODELS = {"large-q4", "large-turbo", "large-turbo-q4"}
+
+
+def _require_mlx_only(engine: str, model_name: str) -> None:
+    if model_name in _MLX_ONLY_MODELS and engine != "mlx-whisper":
+        raise ValueError(
+            f"Model {model_name!r} is MLX-only and not available for "
+            f"engine {engine!r}. Use --engine mlx-whisper, or pick a "
+            f"non-quantized model name (large, large-v3, medium, ...)."
+        )
+
+
+def resolve_hf_token(env_token: str, cached_path: str = "~/.cache/huggingface/token"):
+    """Pick the right HuggingFace token source for gated model access.
+
+    Resolution order:
+      1. `env_token` if non-empty (typically `os.environ["HF_TOKEN"]`)
+      2. Cached `huggingface-cli login` at `cached_path` — return None so
+         `huggingface_hub` falls back to its own cached credential.
+      3. Raise FileNotFoundError if neither is available.
+
+    Returns:
+        (token_or_None, source_label). `token=None` means "let
+        huggingface_hub handle it via cached login."
+    """
+    if env_token:
+        return env_token, "env"
+    if os.path.exists(os.path.expanduser(cached_path)):
+        return None, "cached-cli-login"
+    raise FileNotFoundError(
+        "No HF_TOKEN env var and no cached huggingface-cli login. "
+        "Either set HF_TOKEN in .env or run `huggingface-cli login`."
+    )
+
+
+def detect_default_engine() -> str:
+    """Pick the fastest available engine on this machine.
+
+    Catches broad Exception (not just ImportError) because optional
+    backends can fail at import time with native-library errors
+    (CTranslate2 ABI mismatch, missing AVX2, etc.) — those should
+    fall through to the next candidate, not abort detection.
+    """
+    is_mac_arm = platform.system() == "Darwin" and platform.machine() == "arm64"
+    if is_mac_arm:
+        try:
+            import mlx_whisper  # noqa: F401
+            return "mlx-whisper"
+        except Exception:
+            pass
+    try:
+        import faster_whisper  # noqa: F401
+        return "faster-whisper"
+    except Exception:
+        pass
+    return "openai-whisper"
+
+
+def transcribe_audio(engine: str, audio_path: str, model_name: str,
+                     language: str, word_timestamps: bool = False) -> dict:
+    """Engine-agnostic transcription. Returns {'segments': [...], 'text': str}."""
+    _require_mlx_only(engine, model_name)
+    if engine == "openai-whisper":
+        return _transcribe_openai(audio_path, model_name, language, word_timestamps)
+    if engine == "mlx-whisper":
+        return _transcribe_mlx(audio_path, model_name, language, word_timestamps)
+    if engine == "faster-whisper":
+        return _transcribe_faster(audio_path, model_name, language, word_timestamps)
+    raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
+
+
+def _transcribe_openai(audio_path, model_name, language, word_timestamps):
+    import whisper
+    name = _OPENAI_NAMES.get(model_name, model_name)
+    key = ("openai", name)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = whisper.load_model(name, device="cpu")
+    model = _MODEL_CACHE[key]
+    result = model.transcribe(
+        audio_path, language=language, fp16=False,
+        word_timestamps=word_timestamps,
+    )
+    return {"segments": result.get("segments", []), "text": result.get("text", "")}
+
+
+def _transcribe_mlx(audio_path, model_name, language, word_timestamps):
+    try:
+        import mlx_whisper
+    except ImportError as e:
+        raise RuntimeError(
+            "mlx-whisper is not installed. On Apple Silicon: pip install mlx-whisper\n"
+            "Or pick a different engine via --engine faster-whisper / openai-whisper."
+        ) from e
+    repo = _MLX_REPOS.get(model_name)
+    if not repo:
+        raise ValueError(f"Unknown MLX model: {model_name!r}. Valid: {', '.join(_MLX_REPOS)}")
+    result = mlx_whisper.transcribe(
+        audio_path,
+        path_or_hf_repo=repo,
+        language=language,
+        word_timestamps=word_timestamps,
+    )
+    return {"segments": result.get("segments", []), "text": result.get("text", "")}
+
+
+def _transcribe_faster(audio_path, model_name, language, word_timestamps):
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as e:
+        raise RuntimeError(
+            "faster-whisper is not installed. Run: pip install faster-whisper"
+        ) from e
+    name = _FASTER_NAMES.get(model_name, model_name)
+    key = ("faster", name)
+    if key not in _MODEL_CACHE:
+        # compute_type="auto" lets CTranslate2 pick the best available
+        # quantization for the host CPU (int8 needs AVX2 on x86_64; on
+        # Apple Silicon int8 works via NEON). Hard-coding int8 would
+        # break on older x86 chips.
+        _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="auto")
+    model = _MODEL_CACHE[key]
+    segments_iter, _info = model.transcribe(
+        audio_path, language=language, word_timestamps=word_timestamps,
+    )
+    segments = []
+    text_parts = []
+    for seg in segments_iter:
+        seg_dict = {"start": seg.start, "end": seg.end, "text": seg.text}
+        if word_timestamps and getattr(seg, "words", None):
+            seg_dict["words"] = [
+                {"start": w.start, "end": w.end, "word": w.word} for w in seg.words
+            ]
+        segments.append(seg_dict)
+        text_parts.append(seg.text)
+    # faster-whisper segments often start with a leading space; strip the
+    # joined result so result["text"] matches openai/mlx behavior.
+    return {"segments": segments, "text": "".join(text_parts).strip()}
+
 
 def load_diarization_pipeline(auth_token: str = None):
     """
@@ -68,19 +259,29 @@ def load_diarization_pipeline(auth_token: str = None):
     """
     import torch
 
-    # Fix for PyTorch 2.6+ compatibility with pyannote models
-    # The models were saved with older PyTorch and need weights_only=False
-    # Monkeypatch torch.load to use weights_only=False for pyannote compatibility
+    # Fix for PyTorch 2.6+ compatibility with pyannote models: pyannote's
+    # weights were saved with an older torch and need weights_only=False
+    # to load. We monkeypatch torch.load only for the duration of the
+    # Pipeline.from_pretrained call, then restore — leaving the patch in
+    # place would force weights_only=False on every torch.load call in
+    # the process for the rest of its lifetime, which is a security
+    # regression (arbitrary pickle execution allowed for any caller).
     _original_torch_load = torch.load
+
     def _patched_torch_load(*args, **kwargs):
         kwargs['weights_only'] = False
         return _original_torch_load(*args, **kwargs)
-    torch.load = _patched_torch_load
 
     from pyannote.audio import Pipeline
 
-    token = auth_token or os.environ.get("HF_TOKEN")
+    # Trailing `or None` normalizes the empty-string case: when .env contains
+    # HF_TOKEN="" and the shell exports it, os.environ.get returns "" (truthy
+    # to Python only as a string presence test, but falsy in `or`-chains).
+    # Without this, pyannote receives use_auth_token="" and tries to auth
+    # with an empty token instead of falling back to the cached CLI login.
+    token = auth_token or os.environ.get("HF_TOKEN") or None
 
+    torch.load = _patched_torch_load
     try:
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
@@ -98,6 +299,8 @@ def load_diarization_pipeline(auth_token: str = None):
                 "See README for detailed setup instructions."
             ) from e
         raise
+    finally:
+        torch.load = _original_torch_load
 
 
 def align_whisper_with_diarization(whisper_segments, diarization):
@@ -237,7 +440,7 @@ def format_diarized_transcript(merged_segments, language: str, include_timestamp
 
 def transcribe_single_file(file_path: str, model_name: str, language: str, print_to_screen: bool,
                            diarize: bool = False, diarization_pipeline=None, include_timestamps: bool = False,
-                           output_path: str = None):
+                           output_path: str = None, engine: str = None):
     """Transcribe a single audio file, optionally with speaker diarization."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -271,30 +474,29 @@ def transcribe_single_file(file_path: str, model_name: str, language: str, print
                 print(f"Error reading existing transcript: {str(e)}")
         return txt_path
     
-    # Load Whisper model
-    print("Loading Whisper model...")
-    model = whisper.load_model(model_name, device="cpu")
-    print(f"Model {model_name} loaded successfully.")
-    
+    engine = engine or detect_default_engine()
+    print(f"Using engine: {engine} (model: {model_name})")
+
     print(f"⏳  Starting transcription of {filename}")
-    
+
     # Create animated progress bar
     start_time = time.time()
     stop_progress = threading.Event()
     progress_thread = threading.Thread(
-        target=show_animated_progress, 
+        target=show_animated_progress,
         args=(filename, stop_progress)
     )
     progress_thread.daemon = True
     progress_thread.start()
-    
+
     try:
-        # Transcribe with Whisper
-        result = model.transcribe(
-            file_path,
+        # Transcribe via pluggable engine
+        result = transcribe_audio(
+            engine=engine,
+            audio_path=file_path,
+            model_name=model_name,
             language=language,
-            fp16=False,
-            word_timestamps=diarize  # Enable detailed timestamps when diarizing
+            word_timestamps=diarize,
         )
 
         # Stop the progress animation
@@ -439,16 +641,15 @@ def unify_transcripts(folder: str, sort_order: str):
     print(f"   Files sorted in {sort_direction} order by filename.")
 
 def transcribe_folder(folder: str, model_name: str, language: str, print_to_screen: bool, unify: str = None,
-                      diarize: bool = False, include_timestamps: bool = False, hf_token: str = None):
+                      diarize: bool = False, include_timestamps: bool = False, hf_token: str = None,
+                      engine: str = None):
     # Check if we should only unify existing files
     if unify and not model_name:
         unify_transcripts(folder, unify)
         return
 
-    # Load Whisper model once
-    print("Loading Whisper model...")
-    model = whisper.load_model(model_name, device="cpu")
-    print(f"Model {model_name} loaded successfully.")
+    engine = engine or detect_default_engine()
+    print(f"Using engine: {engine} (model: {model_name})")
 
     # Load diarization pipeline if requested
     diarization_pipeline = None
@@ -526,12 +727,13 @@ def transcribe_folder(folder: str, model_name: str, language: str, print_to_scre
         progress_thread.start()
         
         try:
-            # Transcribe with Whisper
-            result = model.transcribe(
-                file_path,
+            # Transcribe via pluggable engine
+            result = transcribe_audio(
+                engine=engine,
+                audio_path=file_path,
+                model_name=model_name,
                 language=language,
-                fp16=False,
-                word_timestamps=diarize  # Enable detailed timestamps when diarizing
+                word_timestamps=diarize,
             )
 
             # Stop the progress animation
@@ -662,8 +864,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", "-m",
         default=None,
-        choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model to use (required for transcription, omit to only unify existing transcripts)"
+        choices=["tiny", "base", "small", "medium", "large", "large-v3",
+                 "large-q4", "large-turbo", "large-turbo-q4"],
+        help=("Whisper model to use (required for transcription, omit to only "
+              "unify existing transcripts). The large-q4 / large-turbo / "
+              "large-turbo-q4 variants are MLX-only and trade some quality "
+              "for much lower memory.")
+    )
+    parser.add_argument(
+        "--engine", "-e",
+        # `or None` so an empty TRANSCRIPTION_ENGINE="" from the shell is
+        # treated the same as "unset" (falls through to detect_default_engine).
+        default=os.environ.get("TRANSCRIPTION_ENGINE") or None,
+        choices=list(ENGINES),
+        help=("Transcription engine. Default: auto-detect (mlx-whisper on Apple "
+              "Silicon if installed, else faster-whisper, else openai-whisper). "
+              "Override via TRANSCRIPTION_ENGINE env var.")
     )
     parser.add_argument(
         "--lang", "-l",
@@ -704,6 +920,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # argparse only validates --engine choices for command-line values, not
+    # for `default=` (which we wired to TRANSCRIPTION_ENGINE env var).
+    # Validate explicitly so a typo in .env fails fast with a clear message.
+    if args.engine and args.engine not in ENGINES:
+        parser.error(
+            f"Invalid TRANSCRIPTION_ENGINE {args.engine!r}. "
+            f"Valid: {', '.join(ENGINES)}"
+        )
+
     # Determine if path is a file or directory
     is_file = os.path.isfile(args.path)
     is_dir = os.path.isdir(args.path)
@@ -715,7 +940,7 @@ if __name__ == "__main__":
     # Default model to medium if not specified
     if not args.model and not args.unify:
         if is_file:
-            args.model = "medium"  # Default for single file
+            args.model = "large"  # Default for single file
         else:
             print("Please specify either --model to transcribe or --unify to combine existing transcripts.")
             sys.exit(1)
@@ -726,7 +951,7 @@ if __name__ == "__main__":
             print("Warning: --unify option is only applicable to directories, ignoring.")
 
         # Default to medium model for single files if not specified
-        args.model = args.model or "medium"
+        args.model = args.model or "large"
 
         # Load diarization pipeline if needed (for single file)
         diarization_pipeline = None
@@ -745,12 +970,13 @@ if __name__ == "__main__":
             diarize=args.diarize,
             diarization_pipeline=diarization_pipeline,
             include_timestamps=args.timestamps,
-            output_path=args.output
+            output_path=args.output,
+            engine=args.engine,
         )
     else:  # Directory
-        # If only unifying, pass model=None, otherwise ensure it has a default
-        if args.model:
-            args.model = args.model or "medium"
+        # Directory mode: if --model omitted, args.model is None and the
+        # earlier guard already required either --model or --unify, so by
+        # this point None means "unify-only" — keep it None for that case.
 
         # Process the directory
         transcribe_folder(
@@ -761,5 +987,6 @@ if __name__ == "__main__":
             unify=args.unify,
             diarize=args.diarize,
             include_timestamps=args.timestamps,
-            hf_token=getattr(args, 'hf_token', None)
+            hf_token=getattr(args, 'hf_token', None),
+            engine=args.engine,
         )

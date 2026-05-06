@@ -138,6 +138,15 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+whisper-env/
+
+# Local test fixtures (audio/video and matching transcripts) — never commit
+testing/
+*.m4a
+*.mp4
+*-he.txt
+*-en.txt
+*-diarized.txt
 
 # Spyder project settings
 .spyderproject
