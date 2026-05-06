@@ -18,11 +18,11 @@ Split large audio files into smaller segments of specified length. Useful for br
 
 ### 4. auto_transcribe_meet.sh
 
-Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates both English and Hebrew transcripts with timestamped filenames. Includes speaker diarization to identify different speakers.
+Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates Hebrew transcripts (or English, or both — configurable via `TRANSCRIPT_LANGS`) with timestamped filenames. Includes speaker diarization to identify different speakers.
 
 **Features:**
 - Accepts any video format (MP4, MOV, etc.) or M4A audio directly
-- Generates dual-language transcripts (English + Hebrew)
+- Generates Hebrew, English, or dual-language transcripts (configurable via `TRANSCRIPT_LANGS`)
 - Speaker diarization (identifies Speaker 1, Speaker 2, etc.)
 - Timestamped output files for easy organization
 - Skips existing files to avoid duplicate work
@@ -254,7 +254,7 @@ python audio_splitter.py path/to/audio_folder --file recording.m4a
 
 ### Auto Transcription (auto_transcribe_meet.sh)
 
-#### Transcribe a video file (generates English + Hebrew):
+#### Transcribe a video file (Hebrew by default; set `TRANSCRIPT_LANGS=both` for English + Hebrew):
 ```
 ./auto_transcribe_meet.sh /path/to/meeting.mp4
 ```
@@ -277,10 +277,13 @@ cp .env.example .env
 | `VENV_DIR` | Path to the Python virtual environment |
 | `OUTPUT_DIR` | Where transcripts are saved |
 | `LOG_FILE` | Log file location |
+| `TRANSCRIPTION_ENGINE` | Whisper engine: `mlx-whisper` / `faster-whisper` / `openai-whisper`. Empty = auto-detect (MLX on Apple Silicon when installed, else faster-whisper, else openai-whisper) |
+| `HF_TOKEN` | HuggingFace token for Pyannote diarization. Empty = falls back to cached `huggingface-cli login` |
+| `TRANSCRIPT_LANGS` | Languages to transcribe per recording: `he` (default), `en`, or `both`. Picking just one is usually right since forcing the wrong language ~5× slows Whisper and produces garbage output |
 | `ENABLE_FAST` | Fast Whisper-only transcription (true/false) |
-| `FAST_MODEL` | Model for fast transcription (tiny, base, small, medium, large) |
+| `FAST_MODEL` | Model for fast transcription (`tiny`, `base`, `small`, `medium`, `large`, `large-v3`, `large-q4`, `large-turbo`, `large-turbo-q4`) |
 | `ENABLE_DIARIZATION` | Speaker identification (true/false) |
-| `DIARIZE_MODEL` | Model for diarized transcription |
+| `DIARIZE_MODEL` | Model for diarized transcription (same options as `FAST_MODEL`) |
 
 #### Automating with macOS Folder Actions
 
@@ -297,7 +300,7 @@ For fully automated transcription when new recordings appear in a folder, see [A
 ## Tips
 
 1. **Complete workflow**: Convert videos to audio with `video_converter.py`, then transcribe with `transcribe.py` for a complete video-to-text pipeline.
-2. **Automated workflow**: Use `auto_transcribe_meet.sh` with macOS Folder Actions to automatically transcribe new recordings in both English and Hebrew.
+2. **Automated workflow**: Use `auto_transcribe_meet.sh` with macOS Folder Actions to automatically transcribe new recordings. Default is Hebrew only; set `TRANSCRIPT_LANGS` in `.env` to `en` or `both` to change.
 3. For best transcription accuracy, use the larger models (`medium` or `large`), but note they require more processing time and memory.
 4. For faster processing with less accuracy, use the `tiny` or `base` models.
 5. The scripts automatically check for existing outputs to avoid duplicate work.
