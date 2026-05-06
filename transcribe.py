@@ -26,11 +26,20 @@ Usage:
     python transcribe.py /path/to/audio_folder \
         --unify desc
 """
-# Suppress known deprecation warnings from dependencies
+# Suppress known deprecation warnings from dependencies. pyannote.audio
+# calls into torchaudio internals that PyTorch is migrating to TorchCodec;
+# the warnings are emitted on every audio file pyannote processes (dozens
+# per diarization run) and are not actionable from this repo's side.
 import warnings
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
-warnings.filterwarnings("ignore", message="torchaudio._backend.list_audio_backends has been deprecated")
 warnings.filterwarnings("ignore", message="Module 'speechbrain.pretrained' was deprecated")
+# torchaudio → TorchCodec migration noise (PyTorch issue #3902)
+warnings.filterwarnings("ignore", category=UserWarning, module=r"torchaudio\..*")
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio\..*")
+warnings.filterwarnings("ignore", message=r".*torchaudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=r".*TorchAudio.*maintenance phase.*")
+warnings.filterwarnings("ignore", message=r".*load_with_torchcodec.*")
+warnings.filterwarnings("ignore", message=r".*AudioMetaData has been deprecated.*")
 
 import os
 import argparse
