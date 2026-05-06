@@ -10,7 +10,8 @@
 #
 
 set -e              # Exit on error
-set -o pipefail     # Surface failures from python through `tee` pipes
+set -o pipefail     # Surface tee failures inside the log() helper
+                    # (e.g. disk full when appending to LOG_FILE)
 
 # Load environment configuration. `set -a` auto-exports every variable
 # defined in .env so child processes (transcribe.py, video_converter.py)
@@ -140,13 +141,18 @@ else
     # Convert video to M4A. Stderr lands in the log so real failures
     # surface, but stdout (tqdm progress bars, etc.) is dropped — those
     # are noisy and not useful in a long-lived log file.
+    #
+    # Wrapped in an explicit `if !` so a non-zero exit produces a clear
+    # log line instead of silently dying via `set -e`.
     log "Converting video to M4A..."
-    python3 "$TOOLS_DIR/video_converter.py" \
+    if ! python3 "$TOOLS_DIR/video_converter.py" \
         "$INPUT_FILE" \
         --output "$OUTPUT_DIR" \
         --format m4a \
-        --bitrate 192k >/dev/null 2>>"$LOG_FILE"
-    CONVERSION_STATUS=$?
+        --bitrate 192k >/dev/null 2>>"$LOG_FILE"; then
+        log "ERROR: video_converter.py exited non-zero — see stderr above in this log"
+        exit 1
+    fi
 
     # Rename the output to our timestamped format
     # video_converter.py keeps original filename (with spaces), not sanitized
@@ -155,7 +161,7 @@ else
         mv "$TEMP_M4A" "$M4A_FILE"
         log "Audio saved: $M4A_FILE"
     else
-        log "ERROR: Audio conversion failed (exit code: $CONVERSION_STATUS)"
+        log "ERROR: video_converter.py succeeded but expected output not found"
         log "Expected file: $TEMP_M4A"
         exit 1
     fi
