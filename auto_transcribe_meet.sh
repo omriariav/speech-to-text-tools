@@ -65,9 +65,12 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# Function to sanitize filename (replace spaces with hyphens, remove special chars)
+# Replace spaces and filesystem-problematic chars (`/`, `:`) with dashes.
+# Preserves unicode characters (Hebrew, Arabic, etc.) — APFS handles them
+# fine, and stripping them produced unreadable base names like
+# `2026-05-07-23-28-----` for Hebrew-titled meetings.
 sanitize_filename() {
-    echo "$1" | sed 's/ /-/g' | sed 's/[^a-zA-Z0-9._-]//g'
+    echo "$1" | tr ' /:' '---'
 }
 
 # Check if file was provided
