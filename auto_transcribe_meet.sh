@@ -1,22 +1,24 @@
 #!/bin/bash
 #
-# Auto-transcribe Google Meet recordings with timestamped filenames
-# Converts video -> M4A and transcribes in both English and Hebrew
-# Includes speaker diarization to identify different speakers
-# Accepts any video format supported by ffmpeg (with or without extension)
-# If input is already M4A, skips conversion and transcribes directly
+# Enqueue a transcription job. Designed for macOS Folder Actions.
+#
+# Folder Actions can dump N files at once; running them in parallel loads
+# multiple MLX whisper models simultaneously and triggers OOM on
+# memory-constrained machines. This script writes a job descriptor to a
+# queue directory and (if no worker is running) spawns a single
+# auto_transcribe_worker.sh that drains the queue serially.
+#
+# The output base name is computed here, at enqueue time, and stored in
+# the job file. That way a crashed-and-re-run job lands on the same output
+# paths — the per-output `-f && skip` checks in transcribe_one.sh make
+# re-runs idempotent.
 #
 # Usage: auto_transcribe_meet.sh /path/to/video_or_audio
 #
 
-set -e              # Exit on error
-set -o pipefail     # Surface tee failures inside the log() helper
-                    # (e.g. disk full when appending to LOG_FILE)
+set -e
+set -o pipefail
 
-# Load environment configuration. `set -a` auto-exports every variable
-# defined in .env so child processes (transcribe.py, video_converter.py)
-# inherit them — notably HF_TOKEN for Pyannote diarization, which would
-# otherwise be a shell-local variable invisible to python.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
@@ -27,53 +29,26 @@ else
     exit 1
 fi
 
-# Validate required variables
-for var in TOOLS_DIR VENV_DIR OUTPUT_DIR LOG_FILE; do
+for var in TOOLS_DIR OUTPUT_DIR LOG_FILE; do
     if [ -z "${!var}" ]; then
         echo "ERROR: $var is not set in .env"
         exit 1
     fi
 done
 
-# Engine selection — empty/unset triggers transcribe.py's auto-detect.
-# `set -a` above already exported TRANSCRIPTION_ENGINE if .env defined it.
-ENGINE_FLAG=()
-if [ -n "${TRANSCRIPTION_ENGINE:-}" ]; then
-    ENGINE_FLAG=(--engine "$TRANSCRIPTION_ENGINE")
-fi
+QUEUE_DIR="${QUEUE_DIR:-$OUTPUT_DIR/.queue}"
+mkdir -p "$QUEUE_DIR" "$OUTPUT_DIR"
 
-# Language(s) to transcribe: "he", "en", or "both". Defaults to "he"
-# since most meetings are Hebrew and the English pass on Hebrew audio
-# produces garbage while ~doubling runtime. Override per-recording by
-# editing .env or passing TRANSCRIPT_LANGS=en/both inline.
-TRANSCRIPT_LANGS="${TRANSCRIPT_LANGS:-he}"
-case "$TRANSCRIPT_LANGS" in
-    he)   DO_HE=true;  DO_EN=false ;;
-    en)   DO_HE=false; DO_EN=true  ;;
-    both) DO_HE=true;  DO_EN=true  ;;
-    *)
-        echo "ERROR: TRANSCRIPT_LANGS must be 'he', 'en', or 'both' (got: '$TRANSCRIPT_LANGS')" >&2
-        exit 1
-        ;;
-esac
-
-# Ensure output directory exists before first log call
-mkdir -p "$OUTPUT_DIR"
-
-# Function to log messages
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [QUEUE] $1" | tee -a "$LOG_FILE"
 }
 
-# Replace spaces and filesystem-problematic chars (`/`, `:`) with dashes.
-# Preserves unicode characters (Hebrew, Arabic, etc.) — APFS handles them
-# fine, and stripping them produced unreadable base names like
-# `2026-05-07-23-28-----` for Hebrew-titled meetings.
 sanitize_filename() {
-    echo "$1" | tr ' /:' '---'
+    # printf, not echo: a filename starting with `-n`/`-e` would be eaten
+    # by echo's flag parsing under some bash builds.
+    printf '%s' "$1" | tr ' /:' '---'
 }
 
-# Check if file was provided
 if [ $# -eq 0 ]; then
     log "ERROR: No file provided"
     exit 1
@@ -81,179 +56,123 @@ fi
 
 INPUT_FILE="$1"
 
-# Check if input file exists
 if [ ! -f "$INPUT_FILE" ]; then
     log "ERROR: File not found: $INPUT_FILE"
     exit 1
 fi
 
-log "=========================================="
-log "Starting auto-transcription"
-log "Input: $INPUT_FILE"
+# Resolve to absolute path so re-runs and dedupe scans match reliably.
+INPUT_ABS="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
 
-# Extract directory and filename (strip any extension)
-INPUT_DIR=$(dirname "$INPUT_FILE")
-FILENAME=$(basename "$INPUT_FILE")
+# Short enqueue mutex — protects dedupe-scan + write window so two
+# Folder Action invocations for the same path can't both pass the dedupe
+# check. Real critical section is sub-second; we wait up to ~5s, and if
+# we still can't get it we check for a stale holder (mkdir-orphan from a
+# killed previous enqueuer) and reclaim via atomic rename. Losing an
+# enqueue invocation is a data-loss event for Folder Actions (no retry),
+# so failing-closed by exit-1 is worse than this auto-recovery.
+ENQUEUE_LOCK="$QUEUE_DIR/.enqueue.lock"
+ENQUEUE_STALE_AGE=5
+ENQUEUE_LOCK_OWNED=false
+
+try_acquire_enqueue_lock() {
+    local attempt
+    for attempt in $(seq 1 50); do
+        if mkdir "$ENQUEUE_LOCK" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+if try_acquire_enqueue_lock; then
+    ENQUEUE_LOCK_OWNED=true
+else
+    # 5s without success — assume a previous holder died mid-section.
+    # Atomic rename picks exactly one reclaimer if multiple invocations
+    # race here simultaneously.
+    lock_birth="$(stat -f %m "$ENQUEUE_LOCK" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    lock_age=$(( now - lock_birth ))
+    if [ "$lock_age" -ge "$ENQUEUE_STALE_AGE" ]; then
+        dead_name="${ENQUEUE_LOCK}.dead.$$.$(date +%s%N)"
+        if mv "$ENQUEUE_LOCK" "$dead_name" 2>/dev/null; then
+            rm -rf "$dead_name"
+            log "Reclaimed stale enqueue lock (age=${lock_age}s)"
+            if try_acquire_enqueue_lock; then
+                ENQUEUE_LOCK_OWNED=true
+            fi
+        else
+            # Another invocation just reclaimed it; one more brief wait.
+            if try_acquire_enqueue_lock; then
+                ENQUEUE_LOCK_OWNED=true
+            fi
+        fi
+    fi
+fi
+
+if [ "$ENQUEUE_LOCK_OWNED" != true ]; then
+    log "ERROR: could not acquire enqueue mutex; aborting"
+    exit 1
+fi
+trap 'if [ "$ENQUEUE_LOCK_OWNED" = true ]; then rmdir "$ENQUEUE_LOCK" 2>/dev/null || true; fi' EXIT
+
+# Dedupe: if the exact same absolute path is already pending, skip.
+for job in "$QUEUE_DIR"/*.job; do
+    [ -e "$job" ] || continue
+    if grep -qxF "INPUT_PATH=$INPUT_ABS" "$job" 2>/dev/null; then
+        log "Duplicate skipped (already queued): $INPUT_ABS"
+        exit 0
+    fi
+done
+
+# Compute output base name now, freeze it in the job file. The
+# timestamp uses seconds AND a short content-derived suffix of the
+# absolute input path, so two same-named files from different folders
+# (or even the same folder in the same second) get distinct BASE_NAMEs.
+# Without the suffix, the `-f && skip` checks in transcribe_one.sh
+# would silently mask one file's transcripts with another's.
+TIMESTAMP=$(date '+%Y-%m-%d-%H-%M-%S')
+FILENAME=$(basename "$INPUT_ABS")
 ORIGINAL_FILENAME="${FILENAME%.*}"
-# If no extension was present, ORIGINAL_FILENAME equals FILENAME
-[ "$ORIGINAL_FILENAME" = "$FILENAME" ] || true
-
-# Get current timestamp (when processing starts)
-TIMESTAMP=$(date '+%Y-%m-%d-%H-%M')
-log "Timestamp: $TIMESTAMP"
-
-# Sanitize the original filename
 SANITIZED_NAME=$(sanitize_filename "$ORIGINAL_FILENAME")
+PATH_HASH="$(printf '%s' "$INPUT_ABS" | md5 -q 2>/dev/null | head -c 6)"
+BASE_NAME="${TIMESTAMP}-${SANITIZED_NAME}-${PATH_HASH}"
 
-# Create timestamped base name
-BASE_NAME="${TIMESTAMP}-${SANITIZED_NAME}"
-log "Base name: $BASE_NAME"
+# Atomic job write: temp file + rename. Nanosecond timestamp + pid for
+# uniqueness; `date +%N` is non-standard but works on Darwin 25.
+JOB_ID="$(date +%s%N)-$$"
+TMP_JOB="$QUEUE_DIR/.tmp.$JOB_ID"
+FINAL_JOB="$QUEUE_DIR/${JOB_ID}.job"
 
-# Define output files
-M4A_FILE="${OUTPUT_DIR}/${BASE_NAME}.m4a"
-FAST_HE="${OUTPUT_DIR}/${BASE_NAME}-he.txt"
-FAST_EN="${OUTPUT_DIR}/${BASE_NAME}-en.txt"
-DIARIZED_HE="${OUTPUT_DIR}/${BASE_NAME}-he-diarized.txt"
-DIARIZED_EN="${OUTPUT_DIR}/${BASE_NAME}-en-diarized.txt"
+# printf, not echo: avoids the `-n` flag-parsing pitfall.
+{
+    printf 'INPUT_PATH=%s\n' "$INPUT_ABS"
+    printf 'BASE_NAME=%s\n'  "$BASE_NAME"
+} > "$TMP_JOB"
+mv "$TMP_JOB" "$FINAL_JOB"
 
-log "Output directory: $OUTPUT_DIR"
+log "Enqueued: $INPUT_ABS (base: $BASE_NAME, job: $(basename "$FINAL_JOB"))"
 
-# Activate virtual environment
-log "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
+# Release enqueue mutex before spawning worker.
+rmdir "$ENQUEUE_LOCK" 2>/dev/null || true
+ENQUEUE_LOCK_OWNED=false
+trap - EXIT
 
-# Add ffmpeg to PATH (Automator doesn't have Homebrew paths)
-export PATH="/opt/homebrew/bin:$PATH"
-
-# Log engine selection (auto-detect when unset)
-if [ -n "$TRANSCRIPTION_ENGINE" ]; then
-    log "Engine: $TRANSCRIPTION_ENGINE"
-else
-    log "Engine: auto-detect (transcribe.py picks best available)"
-fi
-
-# Step 1: Get M4A audio file (convert if needed)
-if [ -f "$M4A_FILE" ]; then
-    log "Audio file already exists: $M4A_FILE"
-elif [[ "$INPUT_FILE" =~ \.[mM]4[aA]$ ]]; then
-    # Input is already M4A - copy it directly
-    log "Input is already M4A, copying to output..."
-    cp "$INPUT_FILE" "$M4A_FILE"
-    log "Audio copied: $M4A_FILE"
-else
-    # Convert video to M4A. Stderr lands in the log so real failures
-    # surface, but stdout (tqdm progress bars, etc.) is dropped — those
-    # are noisy and not useful in a long-lived log file.
-    #
-    # Wrapped in an explicit `if !` so a non-zero exit produces a clear
-    # log line instead of silently dying via `set -e`.
-    log "Converting video to M4A..."
-    if ! python3 "$TOOLS_DIR/video_converter.py" \
-        "$INPUT_FILE" \
-        --output "$OUTPUT_DIR" \
-        --format m4a \
-        --bitrate 192k >/dev/null 2>>"$LOG_FILE"; then
-        log "ERROR: video_converter.py exited non-zero — see stderr above in this log"
-        exit 1
-    fi
-
-    # Rename the output to our timestamped format
-    # video_converter.py keeps original filename (with spaces), not sanitized
-    TEMP_M4A="${OUTPUT_DIR}/${ORIGINAL_FILENAME}.m4a"
-    if [ -f "$TEMP_M4A" ]; then
-        mv "$TEMP_M4A" "$M4A_FILE"
-        log "Audio saved: $M4A_FILE"
-    else
-        log "ERROR: video_converter.py succeeded but expected output not found"
-        log "Expected file: $TEMP_M4A"
-        exit 1
-    fi
-fi
-
-# Step 2: Fast transcription (Whisper only, no diarization)
-if [ "$ENABLE_FAST" = true ]; then
-    log "--- Fast transcription (model: $FAST_MODEL, langs: $TRANSCRIPT_LANGS) ---"
-
-    if [ "$DO_HE" = true ]; then
-        if [ -f "$FAST_HE" ]; then
-            log "Fast Hebrew transcript already exists: $FAST_HE"
-        else
-            log "Fast transcribing in Hebrew..."
-            python3 "$TOOLS_DIR/transcribe.py" \
-                "$M4A_FILE" \
-                --model "$FAST_MODEL" \
-                "${ENGINE_FLAG[@]}" \
-                --lang he \
-                --output "$FAST_HE" >/dev/null 2>>"$LOG_FILE"
-            log "Fast Hebrew transcript saved: $FAST_HE"
-        fi
-    fi
-
-    if [ "$DO_EN" = true ]; then
-        if [ -f "$FAST_EN" ]; then
-            log "Fast English transcript already exists: $FAST_EN"
-        else
-            log "Fast transcribing in English..."
-            python3 "$TOOLS_DIR/transcribe.py" \
-                "$M4A_FILE" \
-                --model "$FAST_MODEL" \
-                "${ENGINE_FLAG[@]}" \
-                --lang en \
-                --output "$FAST_EN" >/dev/null 2>>"$LOG_FILE"
-            log "Fast English transcript saved: $FAST_EN"
-        fi
-    fi
-fi
-
-# Step 3: Diarized transcription (Whisper + Pyannote speaker identification)
-if [ "$ENABLE_DIARIZATION" = true ]; then
-    log "--- Diarized transcription (model: $DIARIZE_MODEL, langs: $TRANSCRIPT_LANGS) ---"
-
-    if [ "$DO_HE" = true ]; then
-        if [ -f "$DIARIZED_HE" ]; then
-            log "Diarized Hebrew transcript already exists: $DIARIZED_HE"
-        else
-            log "Diarized transcribing in Hebrew..."
-            python3 "$TOOLS_DIR/transcribe.py" \
-                "$M4A_FILE" \
-                --model "$DIARIZE_MODEL" \
-                "${ENGINE_FLAG[@]}" \
-                --lang he \
-                --diarize \
-                --output "$DIARIZED_HE" >/dev/null 2>>"$LOG_FILE"
-            log "Diarized Hebrew transcript saved: $DIARIZED_HE"
-        fi
-    fi
-
-    if [ "$DO_EN" = true ]; then
-        if [ -f "$DIARIZED_EN" ]; then
-            log "Diarized English transcript already exists: $DIARIZED_EN"
-        else
-            log "Diarized transcribing in English..."
-            python3 "$TOOLS_DIR/transcribe.py" \
-                "$M4A_FILE" \
-                --model "$DIARIZE_MODEL" \
-                "${ENGINE_FLAG[@]}" \
-                --lang en \
-                --diarize \
-                --output "$DIARIZED_EN" >/dev/null 2>>"$LOG_FILE"
-            log "Diarized English transcript saved: $DIARIZED_EN"
-        fi
-    fi
-fi
-
-log "=========================================="
-log "Auto-transcription completed successfully!"
-log "  Fast transcription: $([ "$ENABLE_FAST" = true ] && echo "ENABLED ($FAST_MODEL)" || echo "DISABLED")"
-log "  Diarization: $([ "$ENABLE_DIARIZATION" = true ] && echo "ENABLED ($DIARIZE_MODEL)" || echo "DISABLED")"
-log "  Languages: $TRANSCRIPT_LANGS"
-log "Output files:"
-log "  - Audio: $M4A_FILE"
-[ "$ENABLE_FAST" = true ] && [ "$DO_HE" = true ] && log "  - Hebrew (fast): $FAST_HE"
-[ "$ENABLE_FAST" = true ] && [ "$DO_EN" = true ] && log "  - English (fast): $FAST_EN"
-[ "$ENABLE_DIARIZATION" = true ] && [ "$DO_HE" = true ] && log "  - Hebrew (diarized): $DIARIZED_HE"
-[ "$ENABLE_DIARIZATION" = true ] && [ "$DO_EN" = true ] && log "  - English (diarized): $DIARIZED_EN"
-log "=========================================="
-
-# Deactivate virtual environment
-deactivate
+# Always attempt to spawn a worker. The worker itself is the only thing
+# that touches $QUEUE_DIR/.worker.lock: it races for the lock via atomic
+# mkdir, and a loser (one started while a sibling is already holding the
+# lock) exits cheaply before touching anything heavy. The enqueuer used
+# to inspect the lock here for stale-recovery, but that created a TOCTOU
+# window where the enqueuer could rm -rf a live worker's lock between
+# mkdir and the worker's pid-file write. Letting the worker own all
+# locking eliminates that race.
+#
+# nohup + disown so the worker survives Automator/Folder Action teardown.
+# Stdout to /dev/null because the worker's log() already writes to
+# $LOG_FILE — redirecting here would double-write every line. Stderr is
+# captured so unexpected failures still surface.
+nohup "$SCRIPT_DIR/auto_transcribe_worker.sh" </dev/null >/dev/null 2>>"$LOG_FILE" &
+disown $! 2>/dev/null || true
+log "Worker ensured (spawn pid $!; may exit immediately if a sibling holds the lock)."

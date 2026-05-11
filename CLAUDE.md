@@ -85,14 +85,20 @@ python audio_splitter.py ./folder --file recording.m4a --output ./split
 ```
 
 ### auto_transcribe_meet.sh
-Automation script for video/audio files. Two-mode transcription: fast Whisper-only transcripts are available immediately, then diarized (speaker-identified) transcripts follow. Designed for use with macOS Folder Actions.
+Entrypoint for macOS Folder Actions. Enqueues a transcription job and returns within ~100ms. A single `auto_transcribe_worker.sh` drains the queue serially so multiple files dropped at once don't load multiple MLX models in parallel and OOM the machine.
 
 ```bash
 ./auto_transcribe_meet.sh /path/to/video.mp4
 ./auto_transcribe_meet.sh /path/to/audio.m4a
 ```
 
-**Two-mode flow:**
+**Queue semantics:**
+- Job file written to `$QUEUE_DIR` with the computed output base name (frozen at enqueue time so crash re-runs land on the same paths).
+- Worker self-spawns if none is alive; FIFO order; exits after `WORKER_IDLE_GRACE_SECONDS` of empty queue.
+- Same absolute input path already pending → dedupe, second enqueue is a no-op.
+- Manual run bypassing the queue: `./transcribe_one.sh <input> <base-name>`.
+
+**Two-mode flow** (in `transcribe_one.sh`):
 1. Convert video → M4A (if needed)
 2. **Fast transcription** (Whisper only, `large` model) → `{name}-he.txt`, `{name}-en.txt`
 3. **Diarized transcription** (Whisper `medium` + Pyannote) → `{name}-he-diarized.txt`, `{name}-en-diarized.txt`
