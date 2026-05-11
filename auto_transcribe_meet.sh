@@ -66,22 +66,57 @@ INPUT_ABS="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
 
 # Short enqueue mutex — protects dedupe-scan + write window so two
 # Folder Action invocations for the same path can't both pass the dedupe
-# check. Held for milliseconds. Bail rather than fail-open: if we can't
-# acquire the lock we'd risk both racers writing duplicate jobs.
+# check. Real critical section is sub-second; we wait up to ~5s, and if
+# we still can't get it we check for a stale holder (mkdir-orphan from a
+# killed previous enqueuer) and reclaim via atomic rename. Losing an
+# enqueue invocation is a data-loss event for Folder Actions (no retry),
+# so failing-closed by exit-1 is worse than this auto-recovery.
 ENQUEUE_LOCK="$QUEUE_DIR/.enqueue.lock"
+ENQUEUE_STALE_AGE=5
 ENQUEUE_LOCK_OWNED=false
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if mkdir "$ENQUEUE_LOCK" 2>/dev/null; then
-        ENQUEUE_LOCK_OWNED=true
-        trap 'if [ "$ENQUEUE_LOCK_OWNED" = true ]; then rmdir "$ENQUEUE_LOCK" 2>/dev/null || true; fi' EXIT
-        break
+
+try_acquire_enqueue_lock() {
+    local attempt
+    for attempt in $(seq 1 50); do
+        if mkdir "$ENQUEUE_LOCK" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+if try_acquire_enqueue_lock; then
+    ENQUEUE_LOCK_OWNED=true
+else
+    # 5s without success — assume a previous holder died mid-section.
+    # Atomic rename picks exactly one reclaimer if multiple invocations
+    # race here simultaneously.
+    lock_birth="$(stat -f %m "$ENQUEUE_LOCK" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    lock_age=$(( now - lock_birth ))
+    if [ "$lock_age" -ge "$ENQUEUE_STALE_AGE" ]; then
+        dead_name="${ENQUEUE_LOCK}.dead.$$.$(date +%s%N)"
+        if mv "$ENQUEUE_LOCK" "$dead_name" 2>/dev/null; then
+            rm -rf "$dead_name"
+            log "Reclaimed stale enqueue lock (age=${lock_age}s)"
+            if try_acquire_enqueue_lock; then
+                ENQUEUE_LOCK_OWNED=true
+            fi
+        else
+            # Another invocation just reclaimed it; one more brief wait.
+            if try_acquire_enqueue_lock; then
+                ENQUEUE_LOCK_OWNED=true
+            fi
+        fi
     fi
-    sleep 0.1
-done
+fi
+
 if [ "$ENQUEUE_LOCK_OWNED" != true ]; then
-    log "ERROR: could not acquire enqueue mutex within 1s; aborting to avoid duplicate enqueue"
+    log "ERROR: could not acquire enqueue mutex; aborting"
     exit 1
 fi
+trap 'if [ "$ENQUEUE_LOCK_OWNED" = true ]; then rmdir "$ENQUEUE_LOCK" 2>/dev/null || true; fi' EXIT
 
 # Dedupe: if the exact same absolute path is already pending, skip.
 for job in "$QUEUE_DIR"/*.job; do
@@ -92,16 +127,18 @@ for job in "$QUEUE_DIR"/*.job; do
     fi
 done
 
-# Compute output base name now, freeze it in the job file. Seconds in
-# the timestamp prevent collisions between same-named files from
-# different folders arriving in the same minute (each would otherwise
-# generate identical BASE_NAME and one would silently overwrite the
-# other's transcripts via the `-f && skip` checks in transcribe_one.sh).
+# Compute output base name now, freeze it in the job file. The
+# timestamp uses seconds AND a short content-derived suffix of the
+# absolute input path, so two same-named files from different folders
+# (or even the same folder in the same second) get distinct BASE_NAMEs.
+# Without the suffix, the `-f && skip` checks in transcribe_one.sh
+# would silently mask one file's transcripts with another's.
 TIMESTAMP=$(date '+%Y-%m-%d-%H-%M-%S')
 FILENAME=$(basename "$INPUT_ABS")
 ORIGINAL_FILENAME="${FILENAME%.*}"
 SANITIZED_NAME=$(sanitize_filename "$ORIGINAL_FILENAME")
-BASE_NAME="${TIMESTAMP}-${SANITIZED_NAME}"
+PATH_HASH="$(printf '%s' "$INPUT_ABS" | md5 -q 2>/dev/null | head -c 6)"
+BASE_NAME="${TIMESTAMP}-${SANITIZED_NAME}-${PATH_HASH}"
 
 # Atomic job write: temp file + rename. Nanosecond timestamp + pid for
 # uniqueness; `date +%N` is non-standard but works on Darwin 25.

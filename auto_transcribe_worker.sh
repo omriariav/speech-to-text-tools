@@ -86,8 +86,18 @@ acquire_lock() {
         return 1
     fi
 
-    log "Clearing stale lock (pid='$holder_pid', age=${lock_age}s)"
-    rm -rf "$WORKER_LOCK"
+    # Stale-recovery is itself racey: two workers can both pass the age
+    # check and both try to `rm -rf` + `mkdir`. To pick exactly one
+    # winner, atomically rename the stale lock dir to a unique name —
+    # only one concurrent `mv` succeeds (POSIX directory rename is
+    # atomic within a filesystem). Losers see "source missing" and exit.
+    local dead_name
+    dead_name="${WORKER_LOCK}.dead.$$.$(date +%s%N)"
+    if ! mv "$WORKER_LOCK" "$dead_name" 2>/dev/null; then
+        return 1
+    fi
+    log "Won stale-lock recovery race (was pid='$holder_pid', age=${lock_age}s)"
+    rm -rf "$dead_name"
     if mkdir "$WORKER_LOCK" 2>/dev/null; then
         printf '%s\n' "$$" > "$WORKER_LOCK/pid"
         return 0

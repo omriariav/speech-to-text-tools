@@ -37,7 +37,7 @@ echo
 if [ -d "$WORKER_LOCK" ]; then
     WORKER_PID="$(cat "$WORKER_LOCK/pid" 2>/dev/null || echo "?")"
     if [ "$WORKER_PID" != "?" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
-        WORKER_ETIME="$(ps -p "$WORKER_PID" -o etime= 2>/dev/null | tr -d ' ')"
+        WORKER_ETIME="$(ps -p "$WORKER_PID" -o etime= 2>/dev/null | tr -d ' ' || true)"
         echo "Worker:    RUNNING (pid $WORKER_PID, up $WORKER_ETIME)"
     else
         echo "Worker:    STALE LOCK (pid $WORKER_PID — process not alive)"
@@ -58,9 +58,11 @@ if [ -d "$WORKER_LOCK" ] && [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "?" ]
         PY_PID=""
     fi
     if [ -n "$PY_PID" ]; then
-        PY_CMD="$(ps -p "$PY_PID" -o command= 2>/dev/null)"
-        PY_CPU="$(ps -p "$PY_PID" -o %cpu= 2>/dev/null | tr -d ' ')"
-        PY_MEM="$(ps -p "$PY_PID" -o %mem= 2>/dev/null | tr -d ' ')"
+        # `ps` exits non-zero if pid disappears between pgrep and here;
+        # tolerate that so view.sh keeps producing a snapshot.
+        PY_CMD="$(ps -p "$PY_PID" -o command= 2>/dev/null || true)"
+        PY_CPU="$(ps -p "$PY_PID" -o %cpu=    2>/dev/null | tr -d ' ' || true)"
+        PY_MEM="$(ps -p "$PY_PID" -o %mem=    2>/dev/null | tr -d ' ' || true)"
         # Pull out the --model and --lang flags for at-a-glance signal.
         MODEL="$(echo "$PY_CMD" | sed -n 's/.*--model \([^ ]*\).*/\1/p')"
         LANG="$(echo "$PY_CMD" | sed -n 's/.*--lang \([^ ]*\).*/\1/p')"
