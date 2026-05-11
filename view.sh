@@ -47,8 +47,16 @@ else
 fi
 
 # Currently transcribing — look for a python child of the worker.
+# pgrep returns non-zero when no match exists; we suppress that so a
+# between-jobs state (worker alive, no python running) doesn't kill
+# this script under `set -e`.
 if [ -d "$WORKER_LOCK" ] && [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "?" ]; then
-    PY_PID="$(pgrep -P "$(pgrep -P "$WORKER_PID" 2>/dev/null | head -1)" 2>/dev/null | head -1)"
+    MID_PID="$(pgrep -P "$WORKER_PID" 2>/dev/null | head -1 || true)"
+    if [ -n "$MID_PID" ]; then
+        PY_PID="$(pgrep -P "$MID_PID" 2>/dev/null | head -1 || true)"
+    else
+        PY_PID=""
+    fi
     if [ -n "$PY_PID" ]; then
         PY_CMD="$(ps -p "$PY_PID" -o command= 2>/dev/null)"
         PY_CPU="$(ps -p "$PY_PID" -o %cpu= 2>/dev/null | tr -d ' ')"

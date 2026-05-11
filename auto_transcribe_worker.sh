@@ -47,30 +47,60 @@ notify() {
     osascript -e "display notification \"${message//\"/\\\"}\" with title \"${title//\"/\\\"}\"" 2>/dev/null || true
 }
 
-# Atomic lock acquisition. If a stale lock points to a dead pid, clear
-# and retry once. Two concurrent workers race here; the loser exits
-# before touching anything expensive.
+# Atomic lock acquisition. Two concurrent workers race here; the loser
+# exits cheaply before touching anything expensive.
+#
+# The pid file is written inside this function, immediately after mkdir
+# succeeds. That closes the window where another worker could see the
+# lock dir without a pid file and incorrectly treat it as stale.
+#
+# Stale recovery uses both pid liveness AND a lock-age check: a lock
+# whose recorded pid is dead OR whose dir is older than $STALE_LOCK_AGE
+# seconds is reclaimable. The age guard protects the moment between
+# mkdir and pid-file write in a sibling worker (very small window, but
+# real).
+STALE_LOCK_AGE=30
+
 acquire_lock() {
     if mkdir "$WORKER_LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$WORKER_LOCK/pid"
         return 0
     fi
-    local stale_pid
-    stale_pid="$(cat "$WORKER_LOCK/pid" 2>/dev/null || echo "")"
-    if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
+
+    local holder_pid lock_birth lock_age now
+    holder_pid="$(cat "$WORKER_LOCK/pid" 2>/dev/null || true)"
+
+    if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
         return 1
     fi
-    log "Clearing stale lock (pid $stale_pid)"
+
+    # No pid yet, or pid dead. Use lock dir mtime to decide whether to
+    # reclaim. `stat -f %m` is the BSD/macOS form (Linux is `stat -c %Y`).
+    lock_birth="$(stat -f %m "$WORKER_LOCK" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    lock_age=$(( now - lock_birth ))
+
+    if [ "$lock_age" -lt "$STALE_LOCK_AGE" ]; then
+        # Probably a sibling worker that just mkdir'd and hasn't yet
+        # written its pid. Defer to it; this worker exits cheaply.
+        return 1
+    fi
+
+    log "Clearing stale lock (pid='$holder_pid', age=${lock_age}s)"
     rm -rf "$WORKER_LOCK"
-    mkdir "$WORKER_LOCK" 2>/dev/null
+    if mkdir "$WORKER_LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$WORKER_LOCK/pid"
+        return 0
+    fi
+    return 1
 }
 
 if ! acquire_lock; then
-    # Another worker is alive. Quiet exit — the existing worker will
-    # process whatever this caller just enqueued.
+    # Another worker is alive (or is just starting). Quiet exit — that
+    # worker will pick up whatever this caller just enqueued.
     exit 0
 fi
 
-echo "$$" > "$WORKER_LOCK/pid"
 trap 'rm -rf "$WORKER_LOCK" 2>/dev/null || true' EXIT
 
 log "Started (pid $$)"
