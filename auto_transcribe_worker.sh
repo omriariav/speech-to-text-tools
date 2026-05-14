@@ -180,14 +180,29 @@ while true; do
 
     # Run pipeline. Don't let a single failure kill the worker — log and
     # move on so the rest of the queue still drains.
-    if "$SCRIPT_DIR/transcribe_one.sh" "$INPUT_PATH" "$BASE_NAME"; then
-        log "Job succeeded: $BASE_NAME"
-        notify "Transcription done" "$(basename "$INPUT_PATH")"
-    else
-        EXIT_CODE=$?
-        log "Job FAILED (exit $EXIT_CODE): $BASE_NAME — see log above for details"
-        notify "Transcription FAILED" "$(basename "$INPUT_PATH") — check log"
-    fi
+    #
+    # Exit-code contract with transcribe_one.sh:
+    #   0   — full pipeline succeeded, transcripts produced
+    #   75  — intentionally skipped (language gate mismatch / skip marker)
+    #   *   — failure; details in $LOG_FILE
+    set +e
+    "$SCRIPT_DIR/transcribe_one.sh" "$INPUT_PATH" "$BASE_NAME"
+    EXIT_CODE=$?
+    set -e
+    case "$EXIT_CODE" in
+        0)
+            log "Job succeeded: $BASE_NAME"
+            notify "Transcription done" "$(basename "$INPUT_PATH")"
+            ;;
+        75)
+            log "Job skipped (language gate): $BASE_NAME"
+            # No toast — skips are routine and shouldn't spam Notification Center.
+            ;;
+        *)
+            log "Job FAILED (exit $EXIT_CODE): $BASE_NAME — see log above for details"
+            notify "Transcription FAILED" "$(basename "$INPUT_PATH") — check log"
+            ;;
+    esac
 
     rm -f "$JOB"
 done

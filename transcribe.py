@@ -176,6 +176,65 @@ def transcribe_audio(engine: str, audio_path: str, model_name: str,
     raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
 
 
+def detect_language(engine: str, audio_path: str, model_name: str,
+                    sample_seconds: int = 30) -> str:
+    """Detect spoken language from the first `sample_seconds` of audio.
+
+    Returns an ISO-639-1 code (e.g. 'he', 'en'). Uses ffmpeg to slice a short
+    16 kHz mono WAV so detection runs in seconds regardless of meeting length.
+    """
+    import subprocess
+    import tempfile
+
+    _require_mlx_only(engine, model_name)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        clip_path = tmp.name
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", audio_path,
+                "-t", str(sample_seconds),
+                "-ac", "1", "-ar", "16000",
+                clip_path,
+            ],
+            check=True,
+        )
+
+        if engine == "mlx-whisper":
+            import mlx_whisper
+            repo = _MLX_REPOS.get(model_name)
+            if not repo:
+                raise ValueError(f"Unknown MLX model: {model_name!r}")
+            result = mlx_whisper.transcribe(clip_path, path_or_hf_repo=repo, language=None)
+            return result.get("language", "") or ""
+        if engine == "faster-whisper":
+            from faster_whisper import WhisperModel
+            name = _FASTER_NAMES.get(model_name, model_name)
+            key = ("faster", name)
+            if key not in _MODEL_CACHE:
+                _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="auto")
+            model = _MODEL_CACHE[key]
+            _segments, info = model.transcribe(clip_path, language=None)
+            return getattr(info, "language", "") or ""
+        if engine == "openai-whisper":
+            import whisper
+            name = _OPENAI_NAMES.get(model_name, model_name)
+            key = ("openai", name)
+            if key not in _MODEL_CACHE:
+                _MODEL_CACHE[key] = whisper.load_model(name, device="cpu")
+            model = _MODEL_CACHE[key]
+            result = model.transcribe(clip_path, language=None, fp16=False)
+            return result.get("language", "") or ""
+        raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
+    finally:
+        try:
+            os.unlink(clip_path)
+        except OSError:
+            pass
+
+
 def _transcribe_openai(audio_path, model_name, language, word_timestamps):
     import whisper
     name = _OPENAI_NAMES.get(model_name, model_name)
@@ -928,6 +987,19 @@ if __name__ == "__main__":
         default=None,
         help="HuggingFace token for accessing Pyannote models (or set HF_TOKEN env var)"
     )
+    parser.add_argument(
+        "--detect-language",
+        action="store_true",
+        help=("Detect the spoken language from the first ~30s of audio, print "
+              "the ISO code (e.g. 'he', 'en') to stdout, and exit. Useful as a "
+              "pre-flight gate before running a full transcription.")
+    )
+    parser.add_argument(
+        "--detect-seconds",
+        type=int,
+        default=30,
+        help="Audio sample length (seconds) for --detect-language. Default: 30."
+    )
     args = parser.parse_args()
 
     # argparse only validates --engine choices for command-line values, not
@@ -938,6 +1010,22 @@ if __name__ == "__main__":
             f"Invalid TRANSCRIPTION_ENGINE {args.engine!r}. "
             f"Valid: {', '.join(ENGINES)}"
         )
+
+    # Short-circuit: language detection mode. Runs on first --detect-seconds
+    # of audio, prints the ISO code, and exits. Used by transcribe_one.sh as
+    # a gate before kicking off the (much more expensive) full pipeline.
+    if args.detect_language:
+        if not os.path.isfile(args.path):
+            print(f"Error: '{args.path}' is not a file.", file=sys.stderr)
+            sys.exit(1)
+        engine = args.engine or detect_default_engine()
+        model = args.model or "large-turbo-q4" if engine == "mlx-whisper" else (args.model or "large")
+        lang = detect_language(engine, args.path, model, sample_seconds=args.detect_seconds)
+        if not lang:
+            print("Error: language detection returned no result.", file=sys.stderr)
+            sys.exit(2)
+        print(lang)
+        sys.exit(0)
 
     # Determine if path is a file or directory
     is_file = os.path.isfile(args.path)

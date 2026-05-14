@@ -15,6 +15,11 @@
 set -e
 set -o pipefail
 
+# Sentinel exit code used to tell the worker "intentionally skipped, not
+# a failure". Any value outside 0/1 works; 75 is unused by anything in
+# the pipeline and avoids overlap with shell signal-based codes (128+N).
+EXIT_LANGUAGE_SKIP=75
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
@@ -78,11 +83,37 @@ FAST_EN="${OUTPUT_DIR}/${BASE_NAME}-en.txt"
 DIARIZED_HE="${OUTPUT_DIR}/${BASE_NAME}-he-diarized.txt"
 DIARIZED_EN="${OUTPUT_DIR}/${BASE_NAME}-en-diarized.txt"
 
+# Stable per-input dedupe key for language-gate skips. BASE_NAME has an
+# enqueue-time timestamp baked in, so a re-fire from Folder Actions gets a
+# fresh BASE_NAME and bypasses any BASE_NAME-keyed marker. Use the full
+# md5 of the absolute input path — the 6-char truncation in
+# auto_transcribe_meet.sh is fine inside BASE_NAME (namespaced by
+# timestamp+name) but as a standalone key here it would collide.
+PATH_HASH="$(printf '%s' "$INPUT_PATH" | md5 -q 2>/dev/null)"
+SKIPPED_DIR="${OUTPUT_DIR}/.skipped"
+SKIPPED_MARKER="${SKIPPED_DIR}/${PATH_HASH}"
+
 log "=========================================="
 log "Starting transcription job"
 log "Input: $INPUT_PATH"
 log "Base name: $BASE_NAME"
 log "Output directory: $OUTPUT_DIR"
+
+# Fast path: if a previous run already gated this exact input out under the
+# *currently configured* gate, no-op. We deliberately don't honor stale
+# markers when LANGUAGE_GATE is unset or has changed — a config change
+# should re-run detection, not silently keep skipping.
+if [ -n "${LANGUAGE_GATE:-}" ] && [ -f "$SKIPPED_MARKER" ]; then
+    MARKER_CONTENTS=$(cat "$SKIPPED_MARKER" 2>/dev/null)
+    MARKER_GATE=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*gate=\([^ ]*\).*/\1/p')
+    MARKER_PATH=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*path=\(.*\)$/\1/p')
+    if [ "$MARKER_GATE" = "$LANGUAGE_GATE" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
+        log "Skip marker present (matches current gate), no-op: $MARKER_CONTENTS"
+        log "=========================================="
+        exit "$EXIT_LANGUAGE_SKIP"
+    fi
+    log "Skip marker exists but gate/path mismatch — re-evaluating (marker: $MARKER_CONTENTS)"
+fi
 
 log "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
@@ -96,11 +127,15 @@ else
 fi
 
 # Step 1: Get M4A audio file (convert if needed)
+# Track whether *this* run produced the M4A. If it was already present
+# (resumed run, manual prep), downstream cleanup paths must not delete it.
+M4A_CREATED_THIS_RUN=false
 if [ -f "$M4A_FILE" ]; then
     log "Audio file already exists: $M4A_FILE"
 elif [[ "$INPUT_PATH" =~ \.[mM]4[aA]$ ]]; then
     log "Input is already M4A, copying to output..."
     cp "$INPUT_PATH" "$M4A_FILE"
+    M4A_CREATED_THIS_RUN=true
     log "Audio copied: $M4A_FILE"
 else
     log "Converting video to M4A..."
@@ -116,11 +151,65 @@ else
     TEMP_M4A="${OUTPUT_DIR}/${ORIGINAL_FILENAME}.m4a"
     if [ -f "$TEMP_M4A" ]; then
         mv "$TEMP_M4A" "$M4A_FILE"
+        M4A_CREATED_THIS_RUN=true
         log "Audio saved: $M4A_FILE"
     else
         log "ERROR: video_converter.py succeeded but expected output not found"
         log "Expected file: $TEMP_M4A"
         exit 1
+    fi
+fi
+
+# Step 1.5: Language gate. When LANGUAGE_GATE is set (e.g. "he"), detect the
+# spoken language from the first ~30s and bail out if it doesn't match. Keeps
+# the pipeline from burning minutes diarizing English meetings when the user
+# only cares about Hebrew (or vice versa). Unset = no gating.
+if [ -n "${LANGUAGE_GATE:-}" ]; then
+    # Pick a detection model that we know is downloadable for the chosen
+    # engine. Default order: explicit override > FAST_MODEL (when fast is on)
+    # > DIARIZE_MODEL (diarize-only configs) > FAST_MODEL as last resort.
+    if [ -n "${DETECT_MODEL:-}" ]; then
+        DETECT_MODEL_EFFECTIVE="$DETECT_MODEL"
+    elif [ "$ENABLE_FAST" = true ]; then
+        DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
+    elif [ "$ENABLE_DIARIZATION" = true ]; then
+        DETECT_MODEL_EFFECTIVE="$DIARIZE_MODEL"
+    else
+        DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
+    fi
+    DETECT_SECONDS="${DETECT_SECONDS:-30}"
+    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $LANGUAGE_GATE) ---"
+    if DETECTED_LANG=$(python3 "$TOOLS_DIR/transcribe.py" \
+        "$M4A_FILE" \
+        --model "$DETECT_MODEL_EFFECTIVE" \
+        "${ENGINE_FLAG[@]}" \
+        --detect-language \
+        --detect-seconds "$DETECT_SECONDS" 2>>"$LOG_FILE"); then
+        log "Detected language: $DETECTED_LANG"
+    else
+        log "ERROR: language detection failed — see log above. Skipping job."
+        # Only clean up the m4a if we made it this run; an existing one
+        # may belong to a resumed/partial prior run we shouldn't clobber.
+        if [ "$M4A_CREATED_THIS_RUN" = true ]; then
+            rm -f "$M4A_FILE"
+        fi
+        exit 1
+    fi
+    if [ "$DETECTED_LANG" != "$LANGUAGE_GATE" ]; then
+        log "Language gate: detected '$DETECTED_LANG' != gate '$LANGUAGE_GATE'. Skipping transcription."
+        # Record the skip so future Folder Action re-fires for this same
+        # input path no-op instead of re-running detection.
+        mkdir -p "$SKIPPED_DIR"
+        printf 'lang=%s gate=%s date=%s path=%s\n' \
+            "$DETECTED_LANG" "$LANGUAGE_GATE" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
+            > "$SKIPPED_MARKER"
+        if [ "$M4A_CREATED_THIS_RUN" = true ]; then
+            rm -f "$M4A_FILE"
+        fi
+        log "Job skipped (language mismatch): $BASE_NAME"
+        log "=========================================="
+        deactivate
+        exit "$EXIT_LANGUAGE_SKIP"
     fi
 fi
 
