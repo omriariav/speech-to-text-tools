@@ -25,6 +25,7 @@ Usage:
     python video_converter.py /path/to/videos_folder --force
 """
 import os
+import sys
 import argparse
 import subprocess
 from tqdm import tqdm
@@ -32,6 +33,37 @@ import time
 
 # Supported video file extensions
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.mpg', '.mpeg')
+
+
+def looks_like_media(path):
+    """ffprobe content-detection fallback.
+
+    Some sources (Google Drive Meet "– Recording" files in particular)
+    arrive with no extension, so extension matching silently rejects
+    them. Ask ffprobe what's actually in the container instead. We
+    accept any file whose header decodes to at least one audio or
+    video stream — that's all we need to be able to extract audio
+    via ffmpeg downstream.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=nw=1:nk=1",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    streams = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    return bool(streams & {"audio", "video"})
 
 def get_audio_codec(output_format):
     """Get the appropriate audio codec for the output format."""
@@ -132,11 +164,11 @@ def get_video_files(path, specific_file=None):
 
     # If path is a file
     if os.path.isfile(path):
-        if path.lower().endswith(VIDEO_EXTENSIONS):
+        if path.lower().endswith(VIDEO_EXTENSIONS) or looks_like_media(path):
             video_files.append(path)
         else:
-            print(f"Error: {path} is not a supported video format")
-            print(f"Supported formats: {', '.join(VIDEO_EXTENSIONS)}")
+            print(f"Error: {path} is not a recognizable media file")
+            print(f"Known extensions: {', '.join(VIDEO_EXTENSIONS)}; ffprobe also rejected the contents.")
         return video_files
 
     # If path is a directory
@@ -145,14 +177,17 @@ def get_video_files(path, specific_file=None):
             # Process specific file in directory
             file_path = os.path.join(path, specific_file)
             if os.path.isfile(file_path):
-                if file_path.lower().endswith(VIDEO_EXTENSIONS):
+                if file_path.lower().endswith(VIDEO_EXTENSIONS) or looks_like_media(file_path):
                     video_files.append(file_path)
                 else:
-                    print(f"Error: {specific_file} is not a supported video format")
+                    print(f"Error: {specific_file} is not a recognizable media file")
             else:
                 print(f"Error: File '{file_path}' not found")
         else:
-            # Process all video files in directory
+            # Process all video files in directory. Directory mode stays
+            # extension-based to avoid ffprobe-ing every random file in
+            # the folder; the extensionless-recording case only matters
+            # for the Folder Action path, which always passes a single file.
             for filename in sorted(os.listdir(path)):
                 if filename.lower().endswith(VIDEO_EXTENSIONS):
                     video_files.append(os.path.join(path, filename))
@@ -213,7 +248,9 @@ Examples:
 
     if not video_files:
         print(f"No video files found to process")
-        return
+        # Exit non-zero so callers (transcribe_one.sh) can distinguish
+        # "ran but nothing matched" from "successfully converted N files".
+        sys.exit(1)
 
     # Determine output directory
     if args.output:
@@ -271,6 +308,12 @@ Examples:
     print(f"  ⏱️  Total time: {elapsed:.1f} seconds")
     print(f"  📁 Output directory: {os.path.abspath(output_dir)}")
     print(f"{'='*50}")
+
+    # Surface conversion failures to callers (transcribe_one.sh treats
+    # a non-zero exit as "give up on this job"). Without this, a failed
+    # ffmpeg run was indistinguishable from success at the shell level.
+    if failed > 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
