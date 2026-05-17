@@ -84,7 +84,9 @@ log() {
 normalize_lang() {
     local code="${1:-}"
     code="$(printf '%s' "$code" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    # Strip both `-` and `_` region delimiters (he-IL, he_IL → he).
     code="${code%%-*}"
+    code="${code%%_*}"
     case "$code" in
         iw) code="he" ;;
     esac
@@ -120,13 +122,14 @@ log "Output directory: $OUTPUT_DIR"
 # Fast path: if a previous run already gated this exact input out under the
 # *currently configured* gate, no-op. We deliberately don't honor stale
 # markers when LANGUAGE_GATE is unset or has changed — a config change
-# should re-run detection, not silently keep skipping.
-if [ -n "${LANGUAGE_GATE:-}" ] && [ -f "$SKIPPED_MARKER" ]; then
+# should re-run detection, not silently keep skipping. Whitespace-only
+# values are treated as unset (after normalize they're empty).
+LANGUAGE_GATE_NORM=$(normalize_lang "${LANGUAGE_GATE:-}")
+if [ -n "$LANGUAGE_GATE_NORM" ] && [ -f "$SKIPPED_MARKER" ]; then
     MARKER_CONTENTS=$(cat "$SKIPPED_MARKER" 2>/dev/null)
     MARKER_GATE=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*gate=\([^ ]*\).*/\1/p')
     MARKER_PATH=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*path=\(.*\)$/\1/p')
-    GATE_NORM=$(normalize_lang "$LANGUAGE_GATE")
-    if [ "$(normalize_lang "$MARKER_GATE")" = "$GATE_NORM" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
+    if [ "$(normalize_lang "$MARKER_GATE")" = "$LANGUAGE_GATE_NORM" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
         log "Skip marker present (matches current gate), no-op: $MARKER_CONTENTS"
         log "=========================================="
         exit "$EXIT_LANGUAGE_SKIP"
@@ -183,7 +186,7 @@ fi
 # spoken language from the first ~30s and bail out if it doesn't match. Keeps
 # the pipeline from burning minutes diarizing English meetings when the user
 # only cares about Hebrew (or vice versa). Unset = no gating.
-if [ -n "${LANGUAGE_GATE:-}" ]; then
+if [ -n "$LANGUAGE_GATE_NORM" ]; then
     # Pick a detection model that we know is downloadable for the chosen
     # engine. Default order: explicit override > FAST_MODEL (when fast is on)
     # > DIARIZE_MODEL (diarize-only configs) > FAST_MODEL as last resort.
@@ -197,8 +200,7 @@ if [ -n "${LANGUAGE_GATE:-}" ]; then
         DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
     fi
     DETECT_SECONDS="${DETECT_SECONDS:-30}"
-    GATE_NORM=$(normalize_lang "$LANGUAGE_GATE")
-    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $GATE_NORM) ---"
+    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $LANGUAGE_GATE_NORM) ---"
     if DETECTED_LANG=$(python3 "$TOOLS_DIR/transcribe.py" \
         "$M4A_FILE" \
         --model "$DETECT_MODEL_EFFECTIVE" \
@@ -216,15 +218,15 @@ if [ -n "${LANGUAGE_GATE:-}" ]; then
         exit 1
     fi
     DETECTED_NORM=$(normalize_lang "$DETECTED_LANG")
-    if [ "$DETECTED_NORM" != "$GATE_NORM" ]; then
-        log "Language gate: detected '$DETECTED_NORM' != gate '$GATE_NORM'. Skipping transcription."
+    if [ "$DETECTED_NORM" != "$LANGUAGE_GATE_NORM" ]; then
+        log "Language gate: detected '$DETECTED_NORM' != gate '$LANGUAGE_GATE_NORM'. Skipping transcription."
         # Record the skip so future Folder Action re-fires for this same
         # input path no-op instead of re-running detection. Store the
         # normalized forms so the fast-path comparison is order-insensitive
         # to .env edits like case/region tweaks.
         mkdir -p "$SKIPPED_DIR"
         printf 'lang=%s gate=%s date=%s path=%s\n' \
-            "$DETECTED_NORM" "$GATE_NORM" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
+            "$DETECTED_NORM" "$LANGUAGE_GATE_NORM" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
             > "$SKIPPED_MARKER"
         if [ "$M4A_CREATED_THIS_RUN" = true ]; then
             rm -f "$M4A_FILE"
