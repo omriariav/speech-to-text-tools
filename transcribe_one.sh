@@ -73,6 +73,24 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# Normalize a language code so the gate is robust to:
+#   - casing  (HE / He / he → he)
+#   - whitespace
+#   - the legacy ISO-639-1 'iw' code that some toolchains still emit
+#     where modern Whisper returns 'he'
+#   - region subtags (he-IL, en-US → he, en)
+# Used on both LANGUAGE_GATE and the detected language so a typo or
+# alias in .env doesn't silently skip every recording.
+normalize_lang() {
+    local code="${1:-}"
+    code="$(printf '%s' "$code" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    code="${code%%-*}"
+    case "$code" in
+        iw) code="he" ;;
+    esac
+    printf '%s' "$code"
+}
+
 INPUT_DIR=$(dirname "$INPUT_PATH")
 FILENAME=$(basename "$INPUT_PATH")
 ORIGINAL_FILENAME="${FILENAME%.*}"
@@ -107,7 +125,8 @@ if [ -n "${LANGUAGE_GATE:-}" ] && [ -f "$SKIPPED_MARKER" ]; then
     MARKER_CONTENTS=$(cat "$SKIPPED_MARKER" 2>/dev/null)
     MARKER_GATE=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*gate=\([^ ]*\).*/\1/p')
     MARKER_PATH=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*path=\(.*\)$/\1/p')
-    if [ "$MARKER_GATE" = "$LANGUAGE_GATE" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
+    GATE_NORM=$(normalize_lang "$LANGUAGE_GATE")
+    if [ "$(normalize_lang "$MARKER_GATE")" = "$GATE_NORM" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
         log "Skip marker present (matches current gate), no-op: $MARKER_CONTENTS"
         log "=========================================="
         exit "$EXIT_LANGUAGE_SKIP"
@@ -178,7 +197,8 @@ if [ -n "${LANGUAGE_GATE:-}" ]; then
         DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
     fi
     DETECT_SECONDS="${DETECT_SECONDS:-30}"
-    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $LANGUAGE_GATE) ---"
+    GATE_NORM=$(normalize_lang "$LANGUAGE_GATE")
+    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $GATE_NORM) ---"
     if DETECTED_LANG=$(python3 "$TOOLS_DIR/transcribe.py" \
         "$M4A_FILE" \
         --model "$DETECT_MODEL_EFFECTIVE" \
@@ -195,13 +215,16 @@ if [ -n "${LANGUAGE_GATE:-}" ]; then
         fi
         exit 1
     fi
-    if [ "$DETECTED_LANG" != "$LANGUAGE_GATE" ]; then
-        log "Language gate: detected '$DETECTED_LANG' != gate '$LANGUAGE_GATE'. Skipping transcription."
+    DETECTED_NORM=$(normalize_lang "$DETECTED_LANG")
+    if [ "$DETECTED_NORM" != "$GATE_NORM" ]; then
+        log "Language gate: detected '$DETECTED_NORM' != gate '$GATE_NORM'. Skipping transcription."
         # Record the skip so future Folder Action re-fires for this same
-        # input path no-op instead of re-running detection.
+        # input path no-op instead of re-running detection. Store the
+        # normalized forms so the fast-path comparison is order-insensitive
+        # to .env edits like case/region tweaks.
         mkdir -p "$SKIPPED_DIR"
         printf 'lang=%s gate=%s date=%s path=%s\n' \
-            "$DETECTED_LANG" "$LANGUAGE_GATE" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
+            "$DETECTED_NORM" "$GATE_NORM" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
             > "$SKIPPED_MARKER"
         if [ "$M4A_CREATED_THIS_RUN" = true ]; then
             rm -f "$M4A_FILE"
