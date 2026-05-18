@@ -6,7 +6,7 @@ A collection of Python scripts for transcribing and processing audio files using
 
 ### 1. video_converter.py
 
-Convert video files (`.mp4`, `.mov`, `.avi`, `.mkv`, etc.) to audio-only formats. Extract audio tracks from videos for transcription or archival purposes.
+Convert video files (`.mp4`, `.mov`, `.avi`, `.mkv`, etc.) to audio-only formats. Extract audio tracks from videos for transcription or archival purposes. Single-file inputs that don't match a known extension fall back to an `ffprobe` content-detection check — extensionless media (e.g. Google Drive Meet "– Recording" downloads) is accepted when ffprobe finds at least one audio or video stream.
 
 ### 2. transcribe.py
 
@@ -21,11 +21,12 @@ Split large audio files into smaller segments of specified length. Useful for br
 Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates Hebrew transcripts (or English, or both — configurable via `TRANSCRIPT_LANGS`) with timestamped filenames. Includes speaker diarization to identify different speakers.
 
 **Features:**
-- Accepts any video format (MP4, MOV, etc.) or M4A audio directly
+- Accepts any video format (MP4, MOV, etc.) or M4A audio directly; extensionless files are accepted via ffprobe content detection
 - Generates Hebrew, English, or dual-language transcripts (configurable via `TRANSCRIPT_LANGS`)
+- Optional **language gate**: detect the spoken language from the first 30s and skip recordings that don't match (e.g. transcribe only Hebrew meetings even when Folder Actions enqueues everything)
 - Speaker diarization (identifies Speaker 1, Speaker 2, etc.)
 - Timestamped output files for easy organization
-- Skips existing files to avoid duplicate work
+- Skips existing files to avoid duplicate work; skip markers under `$OUTPUT_DIR/.skipped/` make language-gate decisions idempotent across Folder Action re-fires
 - Designed for use with macOS Folder Actions for fully automated processing
 
 **Output files:**
@@ -153,6 +154,8 @@ python transcribe.py path/to/audio_folder --unify
 | `--diarize`, `-d` | Enable speaker diarization (requires HuggingFace setup) |
 | `--timestamps`, `-t` | Include timestamps in diarized output |
 | `--hf-token` | HuggingFace token (or set HF_TOKEN env var) |
+| `--detect-language` | Detect the spoken language from the first ~30s, print the ISO code (`he`, `en`, ...), and exit. Useful as a pre-flight gate before full transcription |
+| `--detect-seconds` | Sample length for `--detect-language` (default: 30) |
 
 ### Speaker Diarization
 
@@ -284,6 +287,9 @@ cp .env.example .env
 | `FAST_MODEL` | Model for fast transcription (`tiny`, `base`, `small`, `medium`, `large`, `large-v3`, `large-q4`, `large-turbo`, `large-turbo-q4`) |
 | `ENABLE_DIARIZATION` | Speaker identification (true/false) |
 | `DIARIZE_MODEL` | Model for diarized transcription (same options as `FAST_MODEL`) |
+| `LANGUAGE_GATE` | If set (e.g. `he`), detect the spoken language from the first `DETECT_SECONDS` of audio and skip jobs that don't match. Empty = no gating. Robust to casing, region subtags (`he-IL`), and the legacy `iw` Hebrew alias |
+| `DETECT_MODEL` | Whisper model used for language detection. Empty = reuse `FAST_MODEL` (no extra weights downloaded). Override to `tiny` or `base` for faster detection at the cost of one additional model download |
+| `DETECT_SECONDS` | Audio sample length (seconds) for language detection. Default: `30`. Detection runs on an ffmpeg-sliced clip so cost stays constant regardless of meeting length |
 
 #### Automating with macOS Folder Actions
 
