@@ -165,17 +165,46 @@ fi
 if [ -f "$M4A_FILE" ]; then
     : # Output already exists — no need to touch the source file.
 else
-    ON_DISK_BYTES=$(( $(stat -f %b "$INPUT_PATH" 2>/dev/null || echo 0) * 512 ))
-    TOTAL_BYTES=$(stat -f %z "$INPUT_PATH" 2>/dev/null || echo 0)
-    if [ "$TOTAL_BYTES" -gt 0 ] && [ "$ON_DISK_BYTES" -lt "$TOTAL_BYTES" ]; then
-        log "Cloud file partially materialized ($((ON_DISK_BYTES/1024/1024))MB / $((TOTAL_BYTES/1024/1024))MB). Forcing download..."
-        MATERIALIZE_START=$(date +%s)
-        if ! cat "$INPUT_PATH" > /dev/null 2>>"$LOG_FILE"; then
-            log "ERROR: failed to materialize cloud file — File Provider read failed"
+    # Retry with backoff. Folder Actions fire on metadata-sync, but
+    # Google Drive's FP extension can take a few seconds to register
+    # the file for read — early reads return EDEADLK ("Resource
+    # deadlock avoided"). Each retry re-checks the on-disk size first
+    # in case Drive started backfilling during the wait. Total wait
+    # ceiling: ~230s before we give up.
+    MATERIALIZE_BACKOFF=(5 15 30 60 120)
+    MATERIALIZE_ATTEMPT=0
+    MATERIALIZE_START=$(date +%s)
+    while :; do
+        ON_DISK_BYTES=$(( $(stat -f %b "$INPUT_PATH" 2>/dev/null || echo 0) * 512 ))
+        TOTAL_BYTES=$(stat -f %z "$INPUT_PATH" 2>/dev/null || echo 0)
+        if [ "$TOTAL_BYTES" -eq 0 ]; then
+            log "ERROR: input file has zero size or is unreadable: $INPUT_PATH"
             exit 1
         fi
-        log "Materialized in $(( $(date +%s) - MATERIALIZE_START ))s"
-    fi
+        if [ "$ON_DISK_BYTES" -ge "$TOTAL_BYTES" ]; then
+            # Either already fully local, or a prior cat attempt
+            # completed in the background — nothing more to do.
+            if [ "$MATERIALIZE_ATTEMPT" -gt 0 ]; then
+                log "File now fully materialized (after $((MATERIALIZE_ATTEMPT)) retries, $(( $(date +%s) - MATERIALIZE_START ))s elapsed)"
+            fi
+            break
+        fi
+        log "Cloud file partially materialized ($((ON_DISK_BYTES/1024/1024))MB / $((TOTAL_BYTES/1024/1024))MB). Forcing download (attempt $((MATERIALIZE_ATTEMPT+1)))..."
+        if cat "$INPUT_PATH" > /dev/null 2>>"$LOG_FILE"; then
+            log "Materialized in $(( $(date +%s) - MATERIALIZE_START ))s"
+            break
+        fi
+        # cat failed — likely EDEADLK from Drive FP extension not
+        # ready yet. Back off and try again.
+        if [ "$MATERIALIZE_ATTEMPT" -ge "${#MATERIALIZE_BACKOFF[@]}" ]; then
+            log "ERROR: failed to materialize cloud file after $MATERIALIZE_ATTEMPT retries ($(( $(date +%s) - MATERIALIZE_START ))s) — giving up"
+            exit 1
+        fi
+        SLEEP_SEC="${MATERIALIZE_BACKOFF[$MATERIALIZE_ATTEMPT]}"
+        log "cat failed (File Provider not ready). Sleeping ${SLEEP_SEC}s then retrying..."
+        sleep "$SLEEP_SEC"
+        MATERIALIZE_ATTEMPT=$((MATERIALIZE_ATTEMPT + 1))
+    done
 fi
 
 # Step 1: Get M4A audio file (convert if needed)
