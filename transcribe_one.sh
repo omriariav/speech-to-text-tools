@@ -148,6 +148,36 @@ else
     log "Engine: auto-detect (transcribe.py picks best available)"
 fi
 
+# Step 0.5: materialize cloud-backed placeholders. macOS File Provider
+# extensions (Google Drive, iCloud, etc.) expose remote files as on-disk
+# stubs whose stat() size reports the real bytes but whose actual data
+# isn't local yet. ffprobe/ffmpeg will choke on these. Force a full read
+# so the FP streams bytes down synchronously before we touch the file.
+#
+# We don't filter by path because the cost of `cat > /dev/null` on an
+# already-local file is just a sequential disk read (1-2s for hundreds
+# of MB on SSD). Cheap insurance vs. the failure mode of silently
+# rejecting a real recording.
+#
+# brctl download is iCloud-only — Google Drive paths return "Path is
+# outside of any CloudDocs app library, will never sync". A blocking
+# read works for any FP-backed provider.
+if [ -f "$M4A_FILE" ]; then
+    : # Output already exists — no need to touch the source file.
+else
+    ON_DISK_BYTES=$(( $(stat -f %b "$INPUT_PATH" 2>/dev/null || echo 0) * 512 ))
+    TOTAL_BYTES=$(stat -f %z "$INPUT_PATH" 2>/dev/null || echo 0)
+    if [ "$TOTAL_BYTES" -gt 0 ] && [ "$ON_DISK_BYTES" -lt "$TOTAL_BYTES" ]; then
+        log "Cloud file partially materialized ($((ON_DISK_BYTES/1024/1024))MB / $((TOTAL_BYTES/1024/1024))MB). Forcing download..."
+        MATERIALIZE_START=$(date +%s)
+        if ! cat "$INPUT_PATH" > /dev/null 2>>"$LOG_FILE"; then
+            log "ERROR: failed to materialize cloud file — File Provider read failed"
+            exit 1
+        fi
+        log "Materialized in $(( $(date +%s) - MATERIALIZE_START ))s"
+    fi
+fi
+
 # Step 1: Get M4A audio file (convert if needed)
 # Track whether *this* run produced the M4A. If it was already present
 # (resumed run, manual prep), downstream cleanup paths must not delete it.

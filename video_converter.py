@@ -44,6 +44,11 @@ def looks_like_media(path):
     accept any file whose header decodes to at least one audio or
     video stream — that's all we need to be able to extract audio
     via ffmpeg downstream.
+
+    Surfaces ffprobe's stderr / timeout to our stderr on failure so
+    callers (transcribe_one.sh redirects this script's stderr to the
+    log file) can diagnose why a file was rejected instead of seeing
+    only "not a recognizable media file".
     """
     try:
         result = subprocess.run(
@@ -54,13 +59,19 @@ def looks_like_media(path):
                 path,
             ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             timeout=15,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        print("ffprobe binary not found on PATH", file=sys.stderr)
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"ffprobe timed out after 15s on {path!r} (cloud file not yet materialized?)", file=sys.stderr)
         return False
     if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        print(f"ffprobe rejected {path!r}: rc={result.returncode} stderr={stderr!r}", file=sys.stderr)
         return False
     streams = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     return bool(streams & {"audio", "video"})
