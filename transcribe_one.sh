@@ -166,12 +166,13 @@ if [ -f "$M4A_FILE" ]; then
     : # Output already exists — no need to touch the source file.
 else
     # Retry with backoff. Folder Actions fire on metadata-sync, but
-    # Google Drive's FP extension can take a few seconds to register
-    # the file for read — early reads return EDEADLK ("Resource
-    # deadlock avoided"). Each retry re-checks the on-disk size first
-    # in case Drive started backfilling during the wait. Total wait
-    # ceiling: ~230s before we give up.
-    MATERIALIZE_BACKOFF=(5 15 30 60 120)
+    # Google Drive's FP extension can take several minutes to make a
+    # fresh Meet recording readable — early reads return EDEADLK
+    # ("Resource deadlock avoided") and on-disk size stays at 0 because
+    # Meet's upload to Drive itself isn't finished. Each retry re-checks
+    # on-disk size first in case Drive started backfilling during the
+    # wait. Flat 5-minute waits, 5 attempts, total ceiling: ~25min.
+    MATERIALIZE_BACKOFF=(300 300 300 300 300)
     MATERIALIZE_ATTEMPT=0
     MATERIALIZE_START=$(date +%s)
     while :; do
