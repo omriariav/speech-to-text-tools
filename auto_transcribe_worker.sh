@@ -200,7 +200,12 @@ while true; do
             ;;
         *)
             log "Job FAILED (exit $EXIT_CODE): $BASE_NAME — see log above for details"
-            notify "Transcription FAILED" "$(basename "$INPUT_PATH") — check log"
+            # Google Drive shortcut files (.gdoc, .gsheet, ...) are not media
+            # and always fail. Don't spam Notification Center for them.
+            case "${INPUT_PATH##*.}" in
+                gdoc|gsheet|gslides|gdraw|gform|gmap|gsite|gtable|glink) ;;
+                *) notify "Transcription FAILED" "$(basename "$INPUT_PATH") — check log" ;;
+            esac
             ;;
     esac
 
