@@ -24,7 +24,7 @@ Automated transcription script for Google Meet recordings. Converts video to M4A
 - Accepts any video format (MP4, MOV, etc.) or M4A audio directly; extensionless files are accepted via ffprobe content detection
 - Generates Hebrew, English, or dual-language transcripts (configurable via `TRANSCRIPT_LANGS`)
 - Optional **language gate**: detect the spoken language from the first 30s and skip recordings that don't match (e.g. transcribe only Hebrew meetings even when Folder Actions enqueues everything)
-- Queue-level start delay gives Google Drive time to make fresh Meet recordings readable before conversion/transcription starts
+- Queue-level start delay gives Google Drive time to make fresh Meet recordings readable before conversion/transcription starts, without delaying local files such as Downloads
 - Speaker diarization (identifies Speaker 1, Speaker 2, etc.)
 - Timestamped output files for easy organization
 - Skips existing files to avoid duplicate work; skip markers under `$OUTPUT_DIR/.skipped/` make language-gate decisions idempotent across Folder Action re-fires
@@ -291,7 +291,8 @@ cp .env.example .env
 | `LANGUAGE_GATE` | If set (e.g. `he`), detect the spoken language from the first `DETECT_SECONDS` of audio and skip jobs that don't match. Empty = no gating. Robust to casing, region subtags (`he-IL`), and the legacy `iw` Hebrew alias |
 | `DETECT_MODEL` | Whisper model used for language detection. Empty = reuse `FAST_MODEL` (no extra weights downloaded). Override to `tiny` or `base` for faster detection at the cost of one additional model download |
 | `DETECT_SECONDS` | Audio sample length (seconds) for language detection. Default: `30`. Detection runs on an ffmpeg-sliced clip so cost stays constant regardless of meeting length |
-| `TRANSCRIPTION_START_DELAY_SECONDS` | Minimum seconds between Folder Action enqueue and actual processing. Default: `600` (10 minutes), giving Google Drive time to make new Meet recordings downloadable before materialization/conversion starts |
+| `TRANSCRIPTION_START_DELAY_SECONDS` | Minimum seconds between Folder Action enqueue and actual processing for inputs matching `TRANSCRIPTION_START_DELAY_PATH_SUBSTRING`. Default: `600` (10 minutes), giving Google Drive time to make new Meet recordings downloadable before materialization/conversion starts |
+| `TRANSCRIPTION_START_DELAY_PATH_SUBSTRING` | Absolute input paths must contain this substring to receive the start delay. Default scopes the delay to Google Drive File Provider paths: `/Library/CloudStorage/GoogleDrive-`. Downloads and other local paths start immediately |
 
 #### Automating with macOS Folder Actions
 

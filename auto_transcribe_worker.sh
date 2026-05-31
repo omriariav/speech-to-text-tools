@@ -31,6 +31,7 @@ fi
 QUEUE_DIR="${QUEUE_DIR:-$OUTPUT_DIR/.queue}"
 WORKER_IDLE_GRACE_SECONDS="${WORKER_IDLE_GRACE_SECONDS:-5}"
 TRANSCRIPTION_START_DELAY_SECONDS="${TRANSCRIPTION_START_DELAY_SECONDS:-600}"
+TRANSCRIPTION_START_DELAY_PATH_SUBSTRING="${TRANSCRIPTION_START_DELAY_PATH_SUBSTRING:-/Library/CloudStorage/GoogleDrive-}"
 WORKER_LOCK="$QUEUE_DIR/.worker.lock"
 
 mkdir -p "$QUEUE_DIR"
@@ -151,9 +152,15 @@ job_mtime_epoch() {
 wait_for_start_delay() {
     local job="$1"
     local enqueued_at="$2"
+    local input_path="$3"
     local now age remaining
 
     [ "$TRANSCRIPTION_START_DELAY_SECONDS" -eq 0 ] && return 0
+
+    if [ -n "$TRANSCRIPTION_START_DELAY_PATH_SUBSTRING" ] && [[ "$input_path" != *"$TRANSCRIPTION_START_DELAY_PATH_SUBSTRING"* ]]; then
+        log "Skipping start delay for $(basename "$job") (path outside delay scope: $TRANSCRIPTION_START_DELAY_PATH_SUBSTRING)"
+        return 0
+    fi
 
     case "$enqueued_at" in
         ''|*[!0-9]*)
@@ -212,7 +219,7 @@ while true; do
         continue
     fi
 
-    wait_for_start_delay "$JOB" "$ENQUEUED_AT"
+    wait_for_start_delay "$JOB" "$ENQUEUED_AT" "$INPUT_PATH"
 
     DEPTH="$(queue_depth)"
     log "Processing $(basename "$JOB") (queue depth: $DEPTH)"
