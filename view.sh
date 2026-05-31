@@ -34,9 +34,11 @@ echo "Queue dir: $QUEUE_DIR"
 echo
 
 # Worker status
+WORKER_ALIVE=false
 if [ -d "$WORKER_LOCK" ]; then
     WORKER_PID="$(cat "$WORKER_LOCK/pid" 2>/dev/null || echo "?")"
-    if [ "$WORKER_PID" != "?" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
+    if [ "$WORKER_PID" != "?" ] && ps -p "$WORKER_PID" >/dev/null 2>&1; then
+        WORKER_ALIVE=true
         WORKER_ETIME="$(ps -p "$WORKER_PID" -o etime= 2>/dev/null | tr -d ' ' || true)"
         echo "Worker:    RUNNING (pid $WORKER_PID, up $WORKER_ETIME)"
     else
@@ -50,7 +52,7 @@ fi
 # pgrep returns non-zero when no match exists; we suppress that so a
 # between-jobs state (worker alive, no python running) doesn't kill
 # this script under `set -e`.
-if [ -d "$WORKER_LOCK" ] && [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "?" ]; then
+if [ "$WORKER_ALIVE" = true ]; then
     MID_PID="$(pgrep -P "$WORKER_PID" 2>/dev/null | head -1 || true)"
     if [ -n "$MID_PID" ]; then
         PY_PID="$(pgrep -P "$MID_PID" 2>/dev/null | head -1 || true)"
@@ -74,9 +76,6 @@ if [ -d "$WORKER_LOCK" ] && [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "?" ]
     fi
 fi
 
-# Queue contents
-echo
-echo "Pending jobs:"
 JOBS=()
 for j in "$QUEUE_DIR"/*.job; do
     [ -e "$j" ] || continue
@@ -84,13 +83,34 @@ for j in "$QUEUE_DIR"/*.job; do
 done
 
 if [ "${#JOBS[@]}" -eq 0 ]; then
+    echo
+    echo "Pending jobs:"
     echo "  (queue empty)"
 else
     # Sort by filename (nanosecond timestamp prefix = FIFO order).
     IFS=$'\n' SORTED=($(printf '%s\n' "${JOBS[@]}" | sort))
     unset IFS
+    START_INDEX=0
+
+    if [ -n "${PY_PID:-}" ]; then
+        CURRENT_JOB="${SORTED[0]}"
+        CURRENT_INPUT="$(grep '^INPUT_PATH=' "$CURRENT_JOB" 2>/dev/null | cut -d= -f2-)"
+        CURRENT_BASE="$(grep '^BASE_NAME='  "$CURRENT_JOB" 2>/dev/null | cut -d= -f2-)"
+        echo
+        echo "Current job:"
+        printf "  %s\n     base: %s\n" "$CURRENT_INPUT" "$CURRENT_BASE"
+        START_INDEX=1
+    fi
+
+    echo
+    echo "Pending jobs:"
+    if [ "$START_INDEX" -ge "${#SORTED[@]}" ]; then
+        echo "  (queue empty)"
+    fi
+
     i=1
-    for j in "${SORTED[@]}"; do
+    for ((idx=START_INDEX; idx<${#SORTED[@]}; idx++)); do
+        j="${SORTED[$idx]}"
         INPUT_PATH="$(grep '^INPUT_PATH=' "$j" 2>/dev/null | cut -d= -f2-)"
         BASE_NAME="$(grep '^BASE_NAME='  "$j" 2>/dev/null | cut -d= -f2-)"
         printf "  %d. %s\n     base: %s\n" "$i" "$INPUT_PATH" "$BASE_NAME"

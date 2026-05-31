@@ -94,8 +94,8 @@ Entrypoint for macOS Folder Actions. Enqueues a transcription job and returns wi
 
 **Queue semantics:**
 - Job file written to `$QUEUE_DIR` with the computed output base name (frozen at enqueue time so crash re-runs land on the same paths).
-- Worker self-spawns if none is alive; FIFO order; exits after `WORKER_IDLE_GRACE_SECONDS` of empty queue.
-- Same absolute input path already pending → dedupe, second enqueue is a no-op.
+- Worker self-spawns if none is alive; FIFO order; waits until each job is at least `TRANSCRIPTION_START_DELAY_SECONDS` old before processing; exits after `WORKER_IDLE_GRACE_SECONDS` of empty queue.
+- Same absolute input path, copy-suffix variant, or same-folder recording-name containment already pending → dedupe, second enqueue is a no-op.
 - Manual run bypassing the queue: `./transcribe_one.sh <input> <base-name>`.
 
 **Two-mode flow** (in `transcribe_one.sh`):
