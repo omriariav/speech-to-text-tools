@@ -49,6 +49,46 @@ sanitize_filename() {
     printf '%s' "$1" | tr ' /:' '---'
 }
 
+dedupe_key_for_path() {
+    local path="$1"
+    local dir filename stem normalized_stem
+
+    dir="${path%/*}"
+    filename="${path##*/}"
+    stem="${filename%.*}"
+
+    # Finder/Drive copies usually append " copy", " copy 2", or "(1)"
+    # before the extension. Treat those as the same source recording.
+    normalized_stem="$(printf '%s' "$stem" | sed -E 's/( copy( [0-9]+)?| \([0-9]+\))$//')"
+    printf '%s/%s\n' "$dir" "$normalized_stem"
+}
+
+dedupe_keys_match() {
+    local left_key="$1"
+    local right_key="$2"
+    local left_dir right_dir left_stem right_stem
+
+    [ -n "$left_key" ] && [ -n "$right_key" ] || return 1
+
+    left_dir="${left_key%/*}"
+    right_dir="${right_key%/*}"
+    left_stem="${left_key##*/}"
+    right_stem="${right_key##*/}"
+
+    [ "$left_dir" = "$right_dir" ] || return 1
+    [ -n "$left_stem" ] && [ -n "$right_stem" ] || return 1
+
+    if [ "$left_stem" = "$right_stem" ]; then
+        return 0
+    fi
+
+    if [[ "$left_stem" == *"$right_stem"* ]] || [[ "$right_stem" == *"$left_stem"* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
 if [ $# -eq 0 ]; then
     log "ERROR: No file provided"
     exit 1
@@ -63,6 +103,7 @@ fi
 
 # Resolve to absolute path so re-runs and dedupe scans match reliably.
 INPUT_ABS="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
+INPUT_DEDUPE_KEY="$(dedupe_key_for_path "$INPUT_ABS")"
 
 # Short enqueue mutex — protects dedupe-scan + write window so two
 # Folder Action invocations for the same path can't both pass the dedupe
@@ -118,11 +159,24 @@ if [ "$ENQUEUE_LOCK_OWNED" != true ]; then
 fi
 trap 'if [ "$ENQUEUE_LOCK_OWNED" = true ]; then rmdir "$ENQUEUE_LOCK" 2>/dev/null || true; fi' EXIT
 
-# Dedupe: if the exact same absolute path is already pending, skip.
+# Dedupe: if the same recording, or a filename-containing variant of it,
+# is already pending, skip.
 for job in "$QUEUE_DIR"/*.job; do
     [ -e "$job" ] || continue
-    if grep -qxF "INPUT_PATH=$INPUT_ABS" "$job" 2>/dev/null; then
+    QUEUED_INPUT="$(grep '^INPUT_PATH=' "$job" 2>/dev/null | cut -d= -f2-)"
+    QUEUED_DEDUPE_KEY="$(grep '^DEDUPE_KEY=' "$job" 2>/dev/null | cut -d= -f2-)"
+
+    if [ "$QUEUED_INPUT" = "$INPUT_ABS" ]; then
         log "Duplicate skipped (already queued): $INPUT_ABS"
+        exit 0
+    fi
+
+    if [ -z "$QUEUED_DEDUPE_KEY" ] && [ -n "$QUEUED_INPUT" ]; then
+        QUEUED_DEDUPE_KEY="$(dedupe_key_for_path "$QUEUED_INPUT")"
+    fi
+
+    if dedupe_keys_match "$QUEUED_DEDUPE_KEY" "$INPUT_DEDUPE_KEY"; then
+        log "Duplicate skipped (same recording name): $INPUT_ABS (matches queued: $QUEUED_INPUT)"
         exit 0
     fi
 done
@@ -150,6 +204,8 @@ FINAL_JOB="$QUEUE_DIR/${JOB_ID}.job"
 {
     printf 'INPUT_PATH=%s\n' "$INPUT_ABS"
     printf 'BASE_NAME=%s\n'  "$BASE_NAME"
+    printf 'DEDUPE_KEY=%s\n' "$INPUT_DEDUPE_KEY"
+    printf 'ENQUEUED_AT=%s\n' "$(date +%s)"
 } > "$TMP_JOB"
 mv "$TMP_JOB" "$FINAL_JOB"
 

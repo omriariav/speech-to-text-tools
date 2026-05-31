@@ -30,6 +30,7 @@ fi
 
 QUEUE_DIR="${QUEUE_DIR:-$OUTPUT_DIR/.queue}"
 WORKER_IDLE_GRACE_SECONDS="${WORKER_IDLE_GRACE_SECONDS:-5}"
+TRANSCRIPTION_START_DELAY_SECONDS="${TRANSCRIPTION_START_DELAY_SECONDS:-600}"
 WORKER_LOCK="$QUEUE_DIR/.worker.lock"
 
 mkdir -p "$QUEUE_DIR"
@@ -37,6 +38,13 @@ mkdir -p "$QUEUE_DIR"
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WORKER] $1" | tee -a "$LOG_FILE"
 }
+
+case "$TRANSCRIPTION_START_DELAY_SECONDS" in
+    ''|*[!0-9]*)
+        log "WARN: invalid TRANSCRIPTION_START_DELAY_SECONDS='$TRANSCRIPTION_START_DELAY_SECONDS'; defaulting to 600"
+        TRANSCRIPTION_START_DELAY_SECONDS=600
+        ;;
+esac
 
 # macOS Notification Center toast. Failures here must never kill the
 # worker, so 2>/dev/null and a guard against osascript missing.
@@ -136,6 +144,36 @@ oldest_job() {
     echo "$oldest"
 }
 
+job_mtime_epoch() {
+    stat -f %m "$1" 2>/dev/null || date +%s
+}
+
+wait_for_start_delay() {
+    local job="$1"
+    local enqueued_at="$2"
+    local now age remaining
+
+    [ "$TRANSCRIPTION_START_DELAY_SECONDS" -eq 0 ] && return 0
+
+    case "$enqueued_at" in
+        ''|*[!0-9]*)
+            enqueued_at="$(job_mtime_epoch "$job")"
+            ;;
+    esac
+
+    now="$(date +%s)"
+    age=$(( now - enqueued_at ))
+    if [ "$age" -lt 0 ]; then
+        age=0
+    fi
+
+    remaining=$(( TRANSCRIPTION_START_DELAY_SECONDS - age ))
+    if [ "$remaining" -gt 0 ]; then
+        log "Waiting ${remaining}s before processing $(basename "$job") (age: ${age}s; start delay: ${TRANSCRIPTION_START_DELAY_SECONDS}s)"
+        sleep "$remaining"
+    fi
+}
+
 while true; do
     JOB="$(oldest_job)"
 
@@ -153,18 +191,14 @@ while true; do
     # Read job; tolerate missing fields by defaulting to empty.
     INPUT_PATH=""
     BASE_NAME=""
+    ENQUEUED_AT=""
     while IFS='=' read -r key value; do
         case "$key" in
             INPUT_PATH) INPUT_PATH="$value" ;;
             BASE_NAME)  BASE_NAME="$value" ;;
+            ENQUEUED_AT) ENQUEUED_AT="$value" ;;
         esac
     done < "$JOB"
-
-    DEPTH="$(queue_depth)"
-    log "Processing $(basename "$JOB") (queue depth: $DEPTH)"
-    log "  INPUT_PATH=$INPUT_PATH"
-    log "  BASE_NAME=$BASE_NAME"
-    notify "Transcription started" "$(basename "$INPUT_PATH") (queue: $DEPTH)"
 
     if [ -z "$INPUT_PATH" ] || [ -z "$BASE_NAME" ]; then
         log "ERROR: malformed job file, discarding: $JOB"
@@ -177,6 +211,14 @@ while true; do
         rm -f "$JOB"
         continue
     fi
+
+    wait_for_start_delay "$JOB" "$ENQUEUED_AT"
+
+    DEPTH="$(queue_depth)"
+    log "Processing $(basename "$JOB") (queue depth: $DEPTH)"
+    log "  INPUT_PATH=$INPUT_PATH"
+    log "  BASE_NAME=$BASE_NAME"
+    notify "Transcription started" "$(basename "$INPUT_PATH") (queue: $DEPTH)"
 
     # Run pipeline. Don't let a single failure kill the worker — log and
     # move on so the rest of the queue still drains.
