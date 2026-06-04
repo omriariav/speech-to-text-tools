@@ -251,8 +251,12 @@ while true; do
             log "Job FAILED (exit $EXIT_CODE): $BASE_NAME — see log above for details"
             # Google Drive shortcut files (.gdoc, .gsheet, ...) are not media
             # and always fail. Don't spam Notification Center for them.
-            case "${INPUT_PATH##*.}" in
-                gdoc|gsheet|gslides|gdraw|gform|gmap|gsite|gtable|glink) ;;
+            # These are normally rejected at enqueue time
+            # (auto_transcribe_meet.sh); this is a defense-in-depth fallback
+            # for jobs queued before that filter existed. Keep the list in
+            # sync with the enqueuer.
+            case "$(printf '%s' "${INPUT_PATH##*.}" | tr '[:upper:]' '[:lower:]')" in
+                gdoc|gsheet|gslides|gdraw|gform|gmap|gsite|gtable|glink|gjam|gscript) ;;
                 *) notify "Transcription FAILED" "$(basename "$INPUT_PATH") — check log" ;;
             esac
             ;;
