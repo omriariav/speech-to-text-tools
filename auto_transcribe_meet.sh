@@ -101,6 +101,25 @@ if [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
+# Reject Google Drive shortcut files (.gdoc, .gsheet, ...) before they ever
+# reach the queue. These are tiny JSON pointers to cloud-native docs, not
+# media — and "Notes by Gemini" exports land in the Meet Recordings folder
+# sharing the real recording's name stem. If we enqueued one, the fuzzy
+# name-containment dedupe below would later swallow the actual recording as a
+# "duplicate" and it would never get transcribed. Bail here, before the
+# enqueue lock, so the real file enqueues cleanly when it materializes.
+#
+# Keep this list in sync with the toast-suppression case in
+# auto_transcribe_worker.sh.
+INPUT_BASENAME="$(basename "$INPUT_FILE")"
+INPUT_EXT="$(printf '%s' "${INPUT_BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
+case "$INPUT_EXT" in
+    gdoc|gsheet|gslides|gdraw|gform|gmap|gsite|gtable|glink|gjam|gscript)
+        log "Skipped non-media Drive shortcut file: $INPUT_FILE"
+        exit 0
+        ;;
+esac
+
 # Resolve to absolute path so re-runs and dedupe scans match reliably.
 INPUT_ABS="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
 INPUT_DEDUPE_KEY="$(dedupe_key_for_path "$INPUT_ABS")"

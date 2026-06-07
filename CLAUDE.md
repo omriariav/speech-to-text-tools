@@ -93,6 +93,7 @@ Entrypoint for macOS Folder Actions. Enqueues a transcription job and returns wi
 ```
 
 **Queue semantics:**
+- Google Drive shortcut files (`.gdoc`, `.gsheet`, `.gslides`, `.gdraw`, `.gform`, `.gmap`, `.gsite`, `.gtable`, `.glink`, `.gjam`, `.gscript`) are rejected at enqueue time — they're not media, and a "Notes by Gemini" `.gdoc` shares the recording's name stem, so enqueuing it would dedupe-out the real recording. Filter lives in `auto_transcribe_meet.sh`; keep it in sync with the toast-suppression list in `auto_transcribe_worker.sh`.
 - Job file written to `$QUEUE_DIR` with the computed output base name (frozen at enqueue time so crash re-runs land on the same paths).
 - Worker self-spawns if none is alive; FIFO order; waits until each matching Google Drive job is at least `TRANSCRIPTION_START_DELAY_SECONDS` old before processing; exits after `WORKER_IDLE_GRACE_SECONDS` of empty queue.
 - Same absolute input path, copy-suffix variant, or same-folder recording-name containment already pending → dedupe, second enqueue is a no-op.
