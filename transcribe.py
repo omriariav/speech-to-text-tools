@@ -176,63 +176,144 @@ def transcribe_audio(engine: str, audio_path: str, model_name: str,
     raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
 
 
-def detect_language(engine: str, audio_path: str, model_name: str,
-                    sample_seconds: int = 30) -> str:
-    """Detect spoken language from the first `sample_seconds` of audio.
+# A clip's language ID is only trustworthy if the sample actually contains
+# speech. Whisper always returns *some* language even for silence, so a
+# recording that opens with dead air (e.g. the other party hasn't joined the
+# call yet) gets a confident-looking but meaningless code. We treat a segment
+# as speech only when its `no_speech_prob` is below this threshold; if no
+# segment clears the bar, the detection is reported as undetermined ("") so the
+# caller can choose to proceed rather than gate the whole job on noise.
+_NO_SPEECH_PROB_THRESHOLD = 0.6
 
-    Returns an ISO-639-1 code (e.g. 'he', 'en'). Uses ffmpeg to slice a short
-    16 kHz mono WAV so detection runs in seconds regardless of meeting length.
+
+def _has_speech(segments) -> bool:
+    """True if any segment looks like real speech (low no_speech_prob).
+
+    `segments` is an iterable of dicts (mlx/openai) or objects (faster-whisper)
+    exposing a `no_speech_prob`. An empty/missing set of segments means the
+    decoder found nothing to transcribe — also treated as no speech.
+    """
+    for seg in segments:
+        prob = seg.get("no_speech_prob") if isinstance(seg, dict) \
+            else getattr(seg, "no_speech_prob", None)
+        if prob is None or prob < _NO_SPEECH_PROB_THRESHOLD:
+            return True
+    # No segments, or every segment was flagged as non-speech → silence.
+    return False
+
+
+def _normalize_lang_code(code: str) -> str:
+    """Lowercase, drop region subtags, fold the legacy 'iw' alias to 'he'.
+
+    Mirrors normalize_lang() in transcribe_one.sh so a window's detected code
+    and the gate language compare on the same footing.
+    """
+    code = (code or "").strip().lower()
+    code = code.split("-", 1)[0].split("_", 1)[0]
+    return "he" if code == "iw" else code
+
+
+def _detect_clip(engine: str, clip_path: str, model_name: str):
+    """Transcribe a prepared WAV clip and return (segments, language_code).
+
+    `segments` is whatever the engine yields (list of dicts or objects) so the
+    caller can feed it to _has_speech; `language_code` is the engine's raw guess.
+    """
+    if engine == "mlx-whisper":
+        import mlx_whisper
+        repo = _MLX_REPOS.get(model_name)
+        if not repo:
+            raise ValueError(f"Unknown MLX model: {model_name!r}")
+        result = mlx_whisper.transcribe(clip_path, path_or_hf_repo=repo, language=None)
+        return result.get("segments", []), (result.get("language", "") or "")
+    if engine == "faster-whisper":
+        from faster_whisper import WhisperModel
+        name = _FASTER_NAMES.get(model_name, model_name)
+        key = ("faster", name)
+        if key not in _MODEL_CACHE:
+            _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="auto")
+        model = _MODEL_CACHE[key]
+        # The segment generator is lazy — materialize it so _has_speech can
+        # inspect no_speech_prob before we trust info.language.
+        segments, info = model.transcribe(clip_path, language=None)
+        return list(segments), (getattr(info, "language", "") or "")
+    if engine == "openai-whisper":
+        import whisper
+        name = _OPENAI_NAMES.get(model_name, model_name)
+        key = ("openai", name)
+        if key not in _MODEL_CACHE:
+            _MODEL_CACHE[key] = whisper.load_model(name, device="cpu")
+        model = _MODEL_CACHE[key]
+        result = model.transcribe(clip_path, language=None, fp16=False)
+        return result.get("segments", []), (result.get("language", "") or "")
+    raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
+
+
+def detect_language(engine: str, audio_path: str, model_name: str,
+                    sample_seconds: int = 30, offsets=(0,), match_lang=None) -> str:
+    """Detect the spoken language by sampling one or more windows of audio.
+
+    For each start offset (seconds) in `offsets`, slice a `sample_seconds`
+    16 kHz mono WAV and run language ID. Windows without real speech (silence
+    before the call fills up, music holds, etc.) are ignored.
+
+    Return value:
+      - `match_lang` (normalized) if ANY speech-bearing window matches it. This
+        is the key behavior: a Hebrew meeting that opens with an English "can
+        you hear me?" still passes, because a later window is Hebrew.
+      - otherwise the most common language across speech-bearing windows, so a
+        genuinely non-matching meeting still reports a real code to gate on.
+      - "" when NO window had detectable speech, so the caller can distinguish
+        "undetermined" from a confident detection and choose to proceed.
+
+    Sampling stops early as soon as a window matches `match_lang`.
     """
     import subprocess
     import tempfile
 
     _require_mlx_only(engine, model_name)
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        clip_path = tmp.name
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", audio_path,
-                "-t", str(sample_seconds),
-                "-ac", "1", "-ar", "16000",
-                clip_path,
-            ],
-            check=True,
-        )
+    match_norm = _normalize_lang_code(match_lang) if match_lang else None
+    speech_langs = []
 
-        if engine == "mlx-whisper":
-            import mlx_whisper
-            repo = _MLX_REPOS.get(model_name)
-            if not repo:
-                raise ValueError(f"Unknown MLX model: {model_name!r}")
-            result = mlx_whisper.transcribe(clip_path, path_or_hf_repo=repo, language=None)
-            return result.get("language", "") or ""
-        if engine == "faster-whisper":
-            from faster_whisper import WhisperModel
-            name = _FASTER_NAMES.get(model_name, model_name)
-            key = ("faster", name)
-            if key not in _MODEL_CACHE:
-                _MODEL_CACHE[key] = WhisperModel(name, device="cpu", compute_type="auto")
-            model = _MODEL_CACHE[key]
-            _segments, info = model.transcribe(clip_path, language=None)
-            return getattr(info, "language", "") or ""
-        if engine == "openai-whisper":
-            import whisper
-            name = _OPENAI_NAMES.get(model_name, model_name)
-            key = ("openai", name)
-            if key not in _MODEL_CACHE:
-                _MODEL_CACHE[key] = whisper.load_model(name, device="cpu")
-            model = _MODEL_CACHE[key]
-            result = model.transcribe(clip_path, language=None, fp16=False)
-            return result.get("language", "") or ""
-        raise ValueError(f"Unknown engine: {engine!r}. Valid: {', '.join(ENGINES)}")
-    finally:
+    for offset in offsets:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            clip_path = tmp.name
         try:
-            os.unlink(clip_path)
-        except OSError:
-            pass
+            # -ss before -i = fast input seek. A window past end-of-file yields
+            # an empty clip (no speech) rather than an error on modern ffmpeg;
+            # if a window fails to slice for any reason, skip it rather than
+            # failing the whole detection.
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-ss", str(offset),
+                    "-i", audio_path,
+                    "-t", str(sample_seconds),
+                    "-ac", "1", "-ar", "16000",
+                    clip_path,
+                ],
+            )
+            if proc.returncode != 0:
+                continue
+
+            segments, lang = _detect_clip(engine, clip_path, model_name)
+            if not _has_speech(segments):
+                continue
+            norm = _normalize_lang_code(lang)
+            speech_langs.append(norm)
+            if match_norm and norm == match_norm:
+                return match_norm
+        finally:
+            try:
+                os.unlink(clip_path)
+            except OSError:
+                pass
+
+    if not speech_langs:
+        return ""
+    from collections import Counter
+    return Counter(speech_langs).most_common(1)[0][0]
 
 
 def _transcribe_openai(audio_path, model_name, language, word_timestamps):
@@ -991,14 +1072,31 @@ if __name__ == "__main__":
         "--detect-language",
         action="store_true",
         help=("Detect the spoken language from the first ~30s of audio, print "
-              "the ISO code (e.g. 'he', 'en') to stdout, and exit. Useful as a "
-              "pre-flight gate before running a full transcription.")
+              "the ISO code (e.g. 'he', 'en') to stdout, and exit. Prints 'und' "
+              "when the sample has no detectable speech (e.g. opening silence). "
+              "Useful as a pre-flight gate before running a full transcription.")
     )
     parser.add_argument(
         "--detect-seconds",
         type=int,
         default=30,
         help="Audio sample length (seconds) for --detect-language. Default: 30."
+    )
+    parser.add_argument(
+        "--detect-offsets",
+        default="0",
+        help=("Comma-separated start offsets (seconds) to sample for "
+              "--detect-language, e.g. '0,90,180'. Multiple windows make the "
+              "gate robust to non-matching openings (silence, English "
+              "'can you hear me?'). Default: '0'.")
+    )
+    parser.add_argument(
+        "--detect-match",
+        default=None,
+        help=("Gate language (e.g. 'he') for --detect-language. If any sampled "
+              "window matches it, that code is returned (pass) even when other "
+              "windows differ. Without it, the most common detected language "
+              "is returned.")
     )
     args = parser.parse_args()
 
@@ -1020,11 +1118,21 @@ if __name__ == "__main__":
             sys.exit(1)
         engine = args.engine or detect_default_engine()
         model = args.model or "large-turbo-q4" if engine == "mlx-whisper" else (args.model or "large")
-        lang = detect_language(engine, args.path, model, sample_seconds=args.detect_seconds)
-        if not lang:
-            print("Error: language detection returned no result.", file=sys.stderr)
-            sys.exit(2)
-        print(lang)
+        try:
+            offsets = [int(x) for x in args.detect_offsets.split(",") if x.strip() != ""]
+        except ValueError:
+            parser.error(f"Invalid --detect-offsets {args.detect_offsets!r}: expected comma-separated integers.")
+        if not offsets:
+            offsets = [0]
+        lang = detect_language(engine, args.path, model,
+                               sample_seconds=args.detect_seconds,
+                               offsets=offsets, match_lang=args.detect_match)
+        # Empty result = the sample had no detectable speech (e.g. the meeting
+        # opens with silence before the other party joins). Report it as the
+        # ISO 639-2 "undetermined" code so a language gate can choose to proceed
+        # rather than skip on a meaningless detection. A genuine detection
+        # failure raises before this point and exits non-zero.
+        print(lang if lang else "und")
         sys.exit(0)
 
     # Determine if path is a file or directory

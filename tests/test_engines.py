@@ -237,6 +237,116 @@ class TestMLXAdapter(unittest.TestCase):
         self.assertIn("mlx-whisper", str(ctx.exception))
 
 
+class TestHasSpeech(unittest.TestCase):
+    def test_low_no_speech_prob_is_speech(self):
+        self.assertTrue(transcribe._has_speech([{"no_speech_prob": 0.1}]))
+
+    def test_all_high_no_speech_prob_is_silence(self):
+        # Whisper labels a near-silent clip with high no_speech_prob; the gate
+        # must read that as "no speech" rather than trusting the language ID.
+        self.assertFalse(transcribe._has_speech(
+            [{"no_speech_prob": 0.9}, {"no_speech_prob": 0.95}]))
+
+    def test_no_segments_is_silence(self):
+        self.assertFalse(transcribe._has_speech([]))
+
+    def test_mixed_segments_count_as_speech(self):
+        self.assertTrue(transcribe._has_speech(
+            [{"no_speech_prob": 0.99}, {"no_speech_prob": 0.2}]))
+
+    def test_missing_prob_treated_as_speech(self):
+        # Defensive: a segment without the key shouldn't be silently dropped.
+        self.assertTrue(transcribe._has_speech([{"start": 0, "end": 1}]))
+
+    def test_object_segments_via_attribute(self):
+        # faster-whisper yields objects, not dicts.
+        self.assertFalse(transcribe._has_speech(
+            [SimpleNamespace(no_speech_prob=0.8)]))
+        self.assertTrue(transcribe._has_speech(
+            [SimpleNamespace(no_speech_prob=0.3)]))
+
+
+class TestDetectLanguageNoSpeech(unittest.TestCase):
+    def _run(self, segments, language):
+        fake_mlx = MagicMock()
+        fake_mlx.transcribe.return_value = {"segments": segments, "language": language}
+        with patch.dict(sys.modules, {"mlx_whisper": fake_mlx}), \
+                patch("subprocess.run") as mock_run, \
+                patch("os.unlink"):
+            mock_run.return_value.returncode = 0
+            return transcribe.detect_language(
+                "mlx-whisper", "/tmp/a.m4a", "large-turbo-q4", sample_seconds=30)
+
+    def test_silence_returns_empty_even_with_language(self):
+        # The bug we're fixing: a silent intro still carries a language code
+        # ('en'), but detect_language must report "" so the gate won't skip.
+        self.assertEqual(self._run([{"no_speech_prob": 0.9}], "en"), "")
+
+    def test_speech_returns_detected_language(self):
+        self.assertEqual(self._run([{"no_speech_prob": 0.2}], "he"), "he")
+
+
+class TestDetectLanguageMultiWindow(unittest.TestCase):
+    """detect_language sampling several windows with a gate-match language."""
+
+    SPEECH = [{"no_speech_prob": 0.2}]
+    SILENCE = [{"no_speech_prob": 0.95}]
+
+    def _run(self, windows, offsets, match_lang):
+        # windows: list of (segments, language) returned per offset, in order.
+        with patch("transcribe._detect_clip", side_effect=list(windows)) as clip, \
+                patch("subprocess.run") as mock_run, \
+                patch("os.unlink"):
+            mock_run.return_value.returncode = 0
+            result = transcribe.detect_language(
+                "mlx-whisper", "/tmp/a.m4a", "large-turbo-q4",
+                sample_seconds=30, offsets=offsets, match_lang=match_lang)
+        return result, clip.call_count
+
+    def test_english_opener_then_hebrew_passes(self):
+        # The real-world case: window 0 reads 'en', window 1 is Hebrew. With a
+        # 'he' gate the meeting must pass on the later window.
+        result, _ = self._run(
+            [(self.SPEECH, "en"), (self.SPEECH, "he")],
+            offsets=[0, 90], match_lang="he")
+        self.assertEqual(result, "he")
+
+    def test_match_short_circuits_remaining_windows(self):
+        # Once a window matches the gate, later windows aren't sampled.
+        result, calls = self._run(
+            [(self.SPEECH, "he"), (self.SPEECH, "en"), (self.SPEECH, "en")],
+            offsets=[0, 90, 180], match_lang="he")
+        self.assertEqual(result, "he")
+        self.assertEqual(calls, 1)
+
+    def test_genuinely_english_meeting_still_reports_en(self):
+        # No window is Hebrew → returns the (most common) real code so the gate
+        # still skips a truly English meeting.
+        result, _ = self._run(
+            [(self.SPEECH, "en"), (self.SPEECH, "en"), (self.SPEECH, "en")],
+            offsets=[0, 90, 180], match_lang="he")
+        self.assertEqual(result, "en")
+
+    def test_all_silence_returns_undetermined(self):
+        result, _ = self._run(
+            [(self.SILENCE, "en"), (self.SILENCE, "en")],
+            offsets=[0, 90], match_lang="he")
+        self.assertEqual(result, "")
+
+    def test_silent_windows_skipped_in_vote(self):
+        # A silent window's bogus language must not count toward the vote.
+        result, _ = self._run(
+            [(self.SILENCE, "fr"), (self.SPEECH, "en")],
+            offsets=[0, 90], match_lang="he")
+        self.assertEqual(result, "en")
+
+    def test_iw_window_matches_he_gate(self):
+        # Legacy 'iw' code normalizes to 'he' and satisfies a 'he' gate.
+        result, _ = self._run(
+            [(self.SPEECH, "iw")], offsets=[0], match_lang="he")
+        self.assertEqual(result, "he")
+
+
 class TestFasterWhisperAdapter(unittest.TestCase):
     def setUp(self):
         transcribe._MODEL_CACHE.clear()

@@ -260,13 +260,20 @@ if [ -n "$LANGUAGE_GATE_NORM" ]; then
         DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
     fi
     DETECT_SECONDS="${DETECT_SECONDS:-30}"
-    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $LANGUAGE_GATE_NORM) ---"
+    # Sample several windows, not just the opening. A Hebrew meeting that starts
+    # before the other party joins (silence, or an English "can you hear me?")
+    # was being mis-gated as 'en' on the first 30s alone. With --detect-match,
+    # the gate passes as soon as ANY window is Hebrew. Override via DETECT_OFFSETS.
+    DETECT_OFFSETS="${DETECT_OFFSETS:-0,90,180}"
+    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, offsets: ${DETECT_OFFSETS}s, gate: $LANGUAGE_GATE_NORM) ---"
     if DETECTED_LANG=$(python3 "$TOOLS_DIR/transcribe.py" \
         "$M4A_FILE" \
         --model "$DETECT_MODEL_EFFECTIVE" \
         "${ENGINE_FLAG[@]}" \
         --detect-language \
-        --detect-seconds "$DETECT_SECONDS" 2>>"$LOG_FILE"); then
+        --detect-seconds "$DETECT_SECONDS" \
+        --detect-offsets "$DETECT_OFFSETS" \
+        --detect-match "$LANGUAGE_GATE_NORM" 2>>"$LOG_FILE"); then
         log "Detected language: $DETECTED_LANG"
     else
         log "ERROR: language detection failed — see log above. Skipping job."
@@ -278,7 +285,13 @@ if [ -n "$LANGUAGE_GATE_NORM" ]; then
         exit 1
     fi
     DETECTED_NORM=$(normalize_lang "$DETECTED_LANG")
-    if [ "$DETECTED_NORM" != "$LANGUAGE_GATE_NORM" ]; then
+    # 'und' = the sample had no detectable speech (e.g. the recording starts
+    # before the other party joins, so the first ~30s is silence and Whisper's
+    # language ID is meaningless). Don't gate on noise: fall through and
+    # transcribe — the full pass will pick up the real (Hebrew) content.
+    if [ "$DETECTED_NORM" = "und" ]; then
+        log "Language gate: no speech in first ${DETECT_SECONDS}s (silence — likely recording started before others joined). Proceeding without gating."
+    elif [ "$DETECTED_NORM" != "$LANGUAGE_GATE_NORM" ]; then
         log "Language gate: detected '$DETECTED_NORM' != gate '$LANGUAGE_GATE_NORM'. Skipping transcription."
         # Record the skip so future Folder Action re-fires for this same
         # input path no-op instead of re-running detection. Store the
