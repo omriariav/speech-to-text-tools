@@ -112,6 +112,12 @@ DIARIZED_EN="${OUTPUT_DIR}/${BASE_NAME}-en-diarized.txt"
 PATH_HASH="$(printf '%s' "$INPUT_PATH" | md5 -q 2>/dev/null)"
 SKIPPED_DIR="${OUTPUT_DIR}/.skipped"
 SKIPPED_MARKER="${SKIPPED_DIR}/${PATH_HASH}"
+# Detection-method tag stamped into skip markers. Bump this whenever the gate's
+# detection logic changes so markers written by the old logic are NOT honored —
+# otherwise a recording wrongly skipped by a previous (e.g. single-window)
+# detector would keep no-op'ing and never benefit from the fix. 'mw1' =
+# multi-window voting. Markers without a matching method re-run detection.
+DETECT_METHOD="mw1"
 
 log "=========================================="
 log "Starting transcription job"
@@ -128,13 +134,15 @@ LANGUAGE_GATE_NORM=$(normalize_lang "${LANGUAGE_GATE:-}")
 if [ -n "$LANGUAGE_GATE_NORM" ] && [ -f "$SKIPPED_MARKER" ]; then
     MARKER_CONTENTS=$(cat "$SKIPPED_MARKER" 2>/dev/null)
     MARKER_GATE=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*gate=\([^ ]*\).*/\1/p')
+    MARKER_METHOD=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*method=\([^ ]*\).*/\1/p')
     MARKER_PATH=$(printf '%s\n' "$MARKER_CONTENTS" | sed -n 's/^.*path=\(.*\)$/\1/p')
-    if [ "$(normalize_lang "$MARKER_GATE")" = "$LANGUAGE_GATE_NORM" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
-        log "Skip marker present (matches current gate), no-op: $MARKER_CONTENTS"
+    if [ "$(normalize_lang "$MARKER_GATE")" = "$LANGUAGE_GATE_NORM" ] && \
+       [ "$MARKER_METHOD" = "$DETECT_METHOD" ] && [ "$MARKER_PATH" = "$INPUT_PATH" ]; then
+        log "Skip marker present (matches current gate + method), no-op: $MARKER_CONTENTS"
         log "=========================================="
         exit "$EXIT_LANGUAGE_SKIP"
     fi
-    log "Skip marker exists but gate/path mismatch — re-evaluating (marker: $MARKER_CONTENTS)"
+    log "Skip marker exists but gate/method/path mismatch — re-evaluating (marker: $MARKER_CONTENTS)"
 fi
 
 log "Activating virtual environment..."
@@ -260,13 +268,20 @@ if [ -n "$LANGUAGE_GATE_NORM" ]; then
         DETECT_MODEL_EFFECTIVE="$FAST_MODEL"
     fi
     DETECT_SECONDS="${DETECT_SECONDS:-30}"
-    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, gate: $LANGUAGE_GATE_NORM) ---"
+    # Sample several windows, not just the opening. A Hebrew meeting that starts
+    # before the other party joins (silence, or an English "can you hear me?")
+    # was being mis-gated as 'en' on the first 30s alone. With --detect-match,
+    # the gate passes as soon as ANY window is Hebrew. Override via DETECT_OFFSETS.
+    DETECT_OFFSETS="${DETECT_OFFSETS:-0,90,180}"
+    log "--- Language detection (model: $DETECT_MODEL_EFFECTIVE, sample: ${DETECT_SECONDS}s, offsets: ${DETECT_OFFSETS}s, gate: $LANGUAGE_GATE_NORM) ---"
     if DETECTED_LANG=$(python3 "$TOOLS_DIR/transcribe.py" \
         "$M4A_FILE" \
         --model "$DETECT_MODEL_EFFECTIVE" \
         "${ENGINE_FLAG[@]}" \
         --detect-language \
-        --detect-seconds "$DETECT_SECONDS" 2>>"$LOG_FILE"); then
+        --detect-seconds "$DETECT_SECONDS" \
+        --detect-offsets "$DETECT_OFFSETS" \
+        --detect-match "$LANGUAGE_GATE_NORM" 2>>"$LOG_FILE"); then
         log "Detected language: $DETECTED_LANG"
     else
         log "ERROR: language detection failed — see log above. Skipping job."
@@ -278,15 +293,23 @@ if [ -n "$LANGUAGE_GATE_NORM" ]; then
         exit 1
     fi
     DETECTED_NORM=$(normalize_lang "$DETECTED_LANG")
-    if [ "$DETECTED_NORM" != "$LANGUAGE_GATE_NORM" ]; then
+    # 'und' = none of the sampled windows had detectable speech (e.g. the
+    # recording is silence/hold music before the other party joins, so Whisper's
+    # language ID is meaningless). Don't gate on noise: fall through and
+    # transcribe — the full pass will pick up the real (Hebrew) content.
+    if [ "$DETECTED_NORM" = "und" ]; then
+        log "Language gate: no speech in any sampled window (offsets ${DETECT_OFFSETS}s — likely recording started before others joined). Proceeding without gating."
+    elif [ "$DETECTED_NORM" != "$LANGUAGE_GATE_NORM" ]; then
         log "Language gate: detected '$DETECTED_NORM' != gate '$LANGUAGE_GATE_NORM'. Skipping transcription."
         # Record the skip so future Folder Action re-fires for this same
         # input path no-op instead of re-running detection. Store the
         # normalized forms so the fast-path comparison is order-insensitive
         # to .env edits like case/region tweaks.
         mkdir -p "$SKIPPED_DIR"
-        printf 'lang=%s gate=%s date=%s path=%s\n' \
-            "$DETECTED_NORM" "$LANGUAGE_GATE_NORM" "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
+        # Keep path= last: the fast-path regex captures everything after it.
+        printf 'lang=%s gate=%s method=%s date=%s path=%s\n' \
+            "$DETECTED_NORM" "$LANGUAGE_GATE_NORM" "$DETECT_METHOD" \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$INPUT_PATH" \
             > "$SKIPPED_MARKER"
         if [ "$M4A_CREATED_THIS_RUN" = true ]; then
             rm -f "$M4A_FILE"
