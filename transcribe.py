@@ -263,8 +263,14 @@ def detect_language(engine: str, audio_path: str, model_name: str,
         you hear me?" still passes, because a later window is Hebrew.
       - otherwise the most common language across speech-bearing windows, so a
         genuinely non-matching meeting still reports a real code to gate on.
-      - "" when NO window had detectable speech, so the caller can distinguish
+      - "" when windows were sampled but NONE had detectable speech (e.g. a
+        quiet hold before the call fills up), so the caller can distinguish
         "undetermined" from a confident detection and choose to proceed.
+
+    Raises RuntimeError if no window could be sampled at all (every ffmpeg
+    slice failed — missing binary, unreadable/corrupt input). That is a real
+    detection failure, distinct from "sampled fine but silent", and the caller
+    should skip rather than blindly transcribe.
 
     Sampling stops early as soon as a window matches `match_lang`.
     """
@@ -275,6 +281,7 @@ def detect_language(engine: str, audio_path: str, model_name: str,
 
     match_norm = _normalize_lang_code(match_lang) if match_lang else None
     speech_langs = []
+    windows_sampled = 0
 
     for offset in offsets:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -295,7 +302,11 @@ def detect_language(engine: str, audio_path: str, model_name: str,
                 ],
             )
             if proc.returncode != 0:
+                # Offsets past end-of-file return 0 with an empty clip on modern
+                # ffmpeg; a nonzero code means this slice genuinely failed. Skip
+                # the window but remember it didn't count as a real sample.
                 continue
+            windows_sampled += 1
 
             segments, lang = _detect_clip(engine, clip_path, model_name)
             if not _has_speech(segments):
@@ -310,6 +321,11 @@ def detect_language(engine: str, audio_path: str, model_name: str,
             except OSError:
                 pass
 
+    if windows_sampled == 0:
+        raise RuntimeError(
+            f"language detection failed: could not sample any audio window "
+            f"from {audio_path!r} (offsets={list(offsets)})"
+        )
     if not speech_langs:
         return ""
     from collections import Counter

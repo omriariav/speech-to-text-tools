@@ -346,6 +346,20 @@ class TestDetectLanguageMultiWindow(unittest.TestCase):
             [(self.SPEECH, "iw")], offsets=[0], match_lang="he")
         self.assertEqual(result, "he")
 
+    def test_all_windows_failed_raises(self):
+        # Every ffmpeg slice fails (missing binary, corrupt input) → this is a
+        # real detection failure, not "silent", so the caller must skip rather
+        # than proceed. _detect_clip is never reached.
+        with patch("transcribe._detect_clip") as clip, \
+                patch("subprocess.run") as mock_run, \
+                patch("os.unlink"):
+            mock_run.return_value.returncode = 1
+            with self.assertRaises(RuntimeError):
+                transcribe.detect_language(
+                    "mlx-whisper", "/tmp/a.m4a", "large-turbo-q4",
+                    sample_seconds=30, offsets=[0, 90, 180], match_lang="he")
+        clip.assert_not_called()
+
 
 class TestFasterWhisperAdapter(unittest.TestCase):
     def setUp(self):
