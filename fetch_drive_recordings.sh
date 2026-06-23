@@ -40,9 +40,10 @@ notify() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/.env" ]; then
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
+if [ -f "$ENV_FILE" ]; then
     set -a
-    source "$SCRIPT_DIR/.env"
+    source "$ENV_FILE"
     set +a
 else
     message="ERROR: .env file not found. Copy .env.example to .env and configure it."
@@ -84,6 +85,7 @@ fi
 QUEUE_DIR="${QUEUE_DIR:-$OUTPUT_DIR/.queue}"
 STAGING_DIR="${STAGING_DIR:-$OUTPUT_DIR/.staging}"
 DRIVE_LEDGER_DIR="${DRIVE_LEDGER_DIR:-$OUTPUT_DIR/.drive_done}"
+ENQUEUE_SCRIPT="${ENQUEUE_SCRIPT:-$SCRIPT_DIR/auto_transcribe_meet.sh}"
 # How long a downloaded-but-finished staged file may linger before pruning.
 # Generous: even a 400MB recording transcribes well within this window.
 STAGING_RETENTION_SECONDS="${STAGING_RETENTION_SECONDS:-7200}"
@@ -208,7 +210,7 @@ while IFS=$'\t' read -r FILE_ID FILE_NAME; do
     # Hand off to the normal enqueue path. The staged path is NOT under the
     # GoogleDrive- substring, so the worker's start-delay is auto-skipped and
     # processing begins immediately. auto_transcribe_meet.sh spawns the worker.
-    if "$SCRIPT_DIR/auto_transcribe_meet.sh" "$STAGED_PATH" >>"$LOG_FILE" 2>&1; then
+    if "$ENQUEUE_SCRIPT" "$STAGED_PATH" >>"$LOG_FILE" 2>&1; then
         : > "$LEDGER_MARKER"
         printf 'name=%s\nstaged=%s\nat=%s\n' "$FILE_NAME" "$STAGED_PATH" "$(date '+%Y-%m-%d %H:%M:%S')" > "$LEDGER_MARKER"
         NEW_COUNT=$(( NEW_COUNT + 1 ))
