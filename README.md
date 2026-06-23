@@ -18,17 +18,17 @@ Split large audio files into smaller segments of specified length. Useful for br
 
 ### 4. auto_transcribe_meet.sh
 
-Automated transcription script for Google Meet recordings. Converts video to M4A audio and generates Hebrew transcripts (or English, or both — configurable via `TRANSCRIPT_LANGS`) with timestamped filenames. Includes speaker diarization to identify different speakers.
+Shared queue entrypoint for automated transcription. Converts video to M4A audio and generates Hebrew transcripts (or English, or both — configurable via `TRANSCRIPT_LANGS`) with timestamped filenames. Includes speaker diarization to identify different speakers.
 
 **Features:**
 - Accepts any video format (MP4, MOV, etc.) or M4A audio directly; extensionless files are accepted via ffprobe content detection
 - Generates Hebrew, English, or dual-language transcripts (configurable via `TRANSCRIPT_LANGS`)
 - Optional **language gate**: detect the spoken language from the first 30s and skip recordings that don't match (e.g. transcribe only Hebrew meetings even when Folder Actions enqueues everything)
-- Queue-level start delay gives Google Drive time to make fresh Meet recordings readable before conversion/transcription starts, without delaying local files such as Downloads
+- Queue-level start delay can still protect File Provider paths that need time to become readable, without delaying local files such as Downloads
 - Speaker diarization (identifies Speaker 1, Speaker 2, etc.)
 - Timestamped output files for easy organization
 - Skips existing files to avoid duplicate work; skip markers under `$OUTPUT_DIR/.skipped/` make language-gate decisions idempotent across Folder Action re-fires
-- Designed for use with macOS Folder Actions for fully automated processing
+- Designed as the shared enqueue path for both the Drive API poller and regular macOS Folder Actions
 
 **Output files:**
 ```
@@ -37,7 +37,20 @@ YYYY-MM-DD-HH-MM-Meeting-Name-en.txt   # English transcript
 YYYY-MM-DD-HH-MM-Meeting-Name-he.txt   # Hebrew transcript
 ```
 
-See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md) for setting up automatic transcription when new recordings are added to a folder.
+### 5. fetch_drive_recordings.sh
+
+Drive API poller for Google Meet recordings. It lists the configured Drive folder through the `gws` CLI, downloads new `video/mp4` recordings into a local staging directory, and hands them to `auto_transcribe_meet.sh`.
+
+Use this for the Google Meet Recordings folder instead of a macOS Folder Action. It bypasses Google Drive File Stream placeholder/materialization failures, avoids Gemini Notes `.gdoc` files by MIME type, and keeps idempotency by Drive file ID.
+
+**Features:**
+- Direct Drive API downloads, so ffmpeg receives a fully local file
+- Stable per-file-ID ledger (`DRIVE_LEDGER_DIR`) so each recording is fetched and enqueued once
+- Local staging cleanup after the configured retention window
+- Hourly launchd scheduling via a local plist based on `com.speech-to-text-tools.drivepoll.plist.example`
+- macOS Notification Center summary on every poll, including new/enqueued count, already-handled count, and errors
+
+For regular local folders such as Downloads or voice-recorder drops, keep using macOS Folder Actions with `auto_transcribe_meet.sh`. See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md).
 
 ## Requirements
 
@@ -45,6 +58,8 @@ See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md) for setti
 - OpenAI Whisper
 - FFmpeg (for video_converter.py and audio_splitter.py)
 - tqdm (for progress bars)
+- `gws` CLI for the Drive API poller (`fetch_drive_recordings.sh`)
+- `jq` for filtering Drive API JSON responses
 
 ## Setup
 
@@ -293,10 +308,27 @@ cp .env.example .env
 | `DETECT_SECONDS` | Audio sample length (seconds) for language detection. Default: `30`. Detection runs on an ffmpeg-sliced clip so cost stays constant regardless of meeting length |
 | `TRANSCRIPTION_START_DELAY_SECONDS` | Minimum seconds between Folder Action enqueue and actual processing for inputs matching `TRANSCRIPTION_START_DELAY_PATH_SUBSTRING`. Default: `600` (10 minutes), giving Google Drive time to make new Meet recordings downloadable before materialization/conversion starts |
 | `TRANSCRIPTION_START_DELAY_PATH_SUBSTRING` | Absolute input paths must contain this substring to receive the start delay. Default scopes the delay to Google Drive File Provider paths: `/Library/CloudStorage/GoogleDrive-`. Downloads and other local paths start immediately |
+| `DRIVE_FOLDER_ID` | Google Drive folder ID polled by `fetch_drive_recordings.sh`. Keep the real value only in local `.env`; do not commit it |
+| `STAGING_DIR` | Local directory where Drive API downloads are staged before enqueueing. Keep this outside the Google Drive File Provider path so the worker skips the start delay |
+| `DRIVE_LEDGER_DIR` | Per-Drive-file-ID ledger. Delete a marker to force re-fetching one recording; pre-seed markers to ignore an existing backlog |
+| `STAGING_RETENTION_SECONDS` | How long completed staged files remain before pruning |
+| `DRIVE_NOTIFY` | `1` shows a macOS notification every poll with picked-up/already-handled/error counts. Set to `0` to disable |
+| `GWS_BIN` | Optional absolute path to the `gws` binary. Useful for launchd, which runs with a minimal PATH |
 
-#### Automating with macOS Folder Actions
+#### Automation options
 
-For fully automated transcription when new recordings appear in a folder, see [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md).
+There are two automation paths:
+
+1. **Google Meet Recordings folder**: use `fetch_drive_recordings.sh` on an hourly LaunchAgent. This is the recommended path for Meet recordings because it downloads through the Drive API instead of waiting for Google Drive File Stream to materialize local placeholders.
+
+   ```bash
+   ./fetch_drive_recordings.sh
+   DRY_RUN=1 ./fetch_drive_recordings.sh
+   ```
+
+   Start from `com.speech-to-text-tools.drivepoll.plist.example`, copy it to a local plist under `~/Library/LaunchAgents/`, replace the placeholder paths, then load it with `launchctl`.
+
+2. **Regular local folders**: use a macOS Folder Action that calls `auto_transcribe_meet.sh` for files added to a local folder such as Downloads or a voice-recorder import folder. This path remains useful for real local MP4/M4A files and does not require the Drive poller. See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md).
 
 ## Output
 
@@ -309,12 +341,13 @@ For fully automated transcription when new recordings appear in a folder, see [A
 ## Tips
 
 1. **Complete workflow**: Convert videos to audio with `video_converter.py`, then transcribe with `transcribe.py` for a complete video-to-text pipeline.
-2. **Automated workflow**: Use `auto_transcribe_meet.sh` with macOS Folder Actions to automatically transcribe new recordings. Default is Hebrew only; set `TRANSCRIPT_LANGS` in `.env` to `en` or `both` to change.
-3. For best transcription accuracy, use the larger models (`medium` or `large`), but note they require more processing time and memory.
-4. For faster processing with less accuracy, use the `tiny` or `base` models.
-5. The scripts automatically check for existing outputs to avoid duplicate work.
-6. When processing long audio files, consider splitting them first with `audio_splitter.py`.
-7. For high-quality audio extraction from videos, use `--bitrate 320k` with `video_converter.py`.
+2. **Google Meet automation**: Use `fetch_drive_recordings.sh` with the LaunchAgent example so Meet recordings are downloaded through the Drive API before transcription.
+3. **Local-folder automation**: Use `auto_transcribe_meet.sh` with a regular macOS Folder Action for Downloads, voice-recorder drops, or other local folders. Default is Hebrew only; set `TRANSCRIPT_LANGS` in `.env` to `en` or `both` to change.
+4. For best transcription accuracy, use the larger models (`medium` or `large`), but note they require more processing time and memory.
+5. For faster processing with less accuracy, use the `tiny` or `base` models.
+6. The scripts automatically check for existing outputs to avoid duplicate work.
+7. When processing long audio files, consider splitting them first with `audio_splitter.py`.
+8. For high-quality audio extraction from videos, use `--bitrate 320k` with `video_converter.py`.
 
 ## License
 

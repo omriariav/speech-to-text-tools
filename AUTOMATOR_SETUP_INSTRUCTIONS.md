@@ -2,6 +2,10 @@
 
 Automatically transcribe video/audio files when added to a folder. Includes speaker diarization (identifies different speakers) and generates both English and Hebrew transcripts.
 
+Use this guide for **regular local folders**: Downloads, voice-recorder import folders, manually managed recording folders, or any folder where the media file is already local and readable.
+
+For the Google Meet Recordings folder in Google Drive, prefer `fetch_drive_recordings.sh` with the LaunchAgent template. That path downloads recordings through the Drive API and avoids Google Drive File Stream placeholder/materialization failures.
+
 ## Quick Setup Guide
 
 Follow these steps to set up automatic transcription for **NEW** files only.
@@ -10,7 +14,7 @@ Follow these steps to set up automatic transcription for **NEW** files only.
 
 ---
 
-## Option A: Google Meet Recordings Folder
+## Option A: Generic Local Recordings Folder
 
 ### Step 1: Open Automator
 1. Open **Automator** (⌘ + Space, type "Automator")
@@ -21,9 +25,9 @@ Follow these steps to set up automatic transcription for **NEW** files only.
 ### Step 2: Configure Folder Monitoring
 1. At the top of the workflow, you'll see "Folder Action receives files and folders added to"
 2. Click the dropdown menu and select **Other...**
-3. Navigate to:
+3. Navigate to the local folder you want to monitor, for example:
    ```
-   /Users/omri.a/Library/CloudStorage/GoogleDrive-omri.a@taboola.com/My Drive/Meet Recordings
+   ~/Downloads
    ```
 4. Click **Choose**
 
@@ -38,28 +42,28 @@ Follow these steps to set up automatic transcription for **NEW** files only.
    ```bash
    for f in "$@"
    do
-       /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh "$f"
+       /ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh "$f"
    done
    ```
 
 ### Step 4: Save the Workflow
 1. Press **⌘ + S** to save
-2. Name it: `Auto Transcribe Meet Recordings`
+2. Name it: `Auto Transcribe Local Recordings`
 3. Location: It will automatically save to `~/Library/Workflows/Applications/Folder Actions/`
 4. Click **Save**
 
 ### Step 5: Enable Folder Actions (if needed)
-1. Right-click on the Meet Recordings folder in Finder
+1. Right-click on the monitored folder in Finder
 2. Go to **Services** → **Folder Actions Setup**
 3. Make sure "Enable Folder Actions" is checked
 4. Your workflow should appear in the list
 
 ## How It Works
 
-✅ **NEW files only**: Folder Action triggers ONLY when you add a new MP4 file
+✅ **NEW files only**: Folder Action triggers ONLY when you add a new MP4/M4A file
 ❌ **Existing files ignored**: Files already in the folder before setup are not processed
 
-When you add a new MP4 file to the Meet Recordings folder:
+When you add a new MP4/M4A file to the monitored folder:
 
 1. **Folder Action triggers** automatically
 2. **Script executes** in the background
@@ -76,17 +80,17 @@ To test the setup, copy a file INTO the monitored folder:
 
 ```bash
 # Copy a test file to trigger the folder action
-cp /Users/omri.a/Code/speech-to-text-tools/test.mp4 \
-   "/Users/omri.a/Library/CloudStorage/GoogleDrive-omri.a@taboola.com/My Drive/Meet Recordings/test-recording.mp4"
+cp /ABSOLUTE/PATH/TO/speech-to-text-tools/test.mp4 \
+   "$HOME/Downloads/test-recording.mp4"
 ```
 
-Watch for the new files to appear in the same folder (takes 5-7 minutes).
+Watch for the new files to appear in the configured `OUTPUT_DIR` (takes several minutes).
 
 ## Monitoring
 
 Check the log file to see progress:
 ```bash
-tail -f /tmp/auto_transcribe.log
+tail -f "$LOG_FILE"
 ```
 
 ## Files Created
@@ -124,27 +128,28 @@ The script runs in the background - you don't need to wait.
 3. Verify your workflow is listed and enabled for the folder
 
 ### Test Manually
-Run the script directly on any MP4:
+Run the script directly on any MP4/M4A:
 ```bash
-/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh \
-  "/Users/omri.a/Library/CloudStorage/GoogleDrive-omri.a@taboola.com/My Drive/Meet Recordings/test.mp4"
+/ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh \
+  "$HOME/Downloads/test.mp4"
 ```
 
 ### Check Logs
 View processing logs:
 ```bash
-cat /tmp/auto_transcribe.log
+cat "$LOG_FILE"
 ```
 
 ### Permissions Issue
 Ensure script is executable:
 ```bash
-chmod +x /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh
+chmod +x /ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh
 ```
 
 ## Advanced Configuration
 
-Edit `/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh`:
+Edit `.env` for the normal pipeline settings. If you need script-level changes, edit:
+`/ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh`
 
 ### Toggle Transcription Modes
 ```bash
@@ -170,14 +175,14 @@ Model options: `tiny`, `base`, `small`, `medium`, `large`
 If you want to process existing MP4 files manually:
 
 ```bash
-cd "/Users/omri.a/Library/CloudStorage/GoogleDrive-omri.a@taboola.com/My Drive/Meet Recordings"
+cd "$HOME/Downloads"
 
 # Process a single file
-/Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh "existing-meeting.mp4"
+/ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh "existing-meeting.mp4"
 
 # Or process all MP4 files
 for f in *.mp4; do
-    /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh "$f"
+    /ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh "$f"
 done
 ```
 
@@ -198,7 +203,7 @@ Monitor your Downloads folder and automatically transcribe any MP4/M4A files.
 ### Step 2: Configure Folder Monitoring
 1. At the top of the workflow, you'll see "Folder Action receives files and folders added to"
 2. Click the dropdown menu and select **Other...**
-3. Navigate to: `/Users/omri.a/Downloads`
+3. Navigate to: `~/Downloads`
 4. Click **Choose**
 
 ### Step 3: Add Run Shell Script Action
@@ -213,7 +218,7 @@ Monitor your Downloads folder and automatically transcribe any MP4/M4A files.
    for f in "$@"
    do
        if [[ "$f" =~ \.(mp4|MP4|m4a|M4A)$ ]]; then
-           /Users/omri.a/Code/speech-to-text-tools/auto_transcribe_meet.sh "$f"
+           /ABSOLUTE/PATH/TO/speech-to-text-tools/auto_transcribe_meet.sh "$f"
        fi
    done
    ```

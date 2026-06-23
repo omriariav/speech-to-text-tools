@@ -129,8 +129,8 @@ Entrypoint for macOS Folder Actions (Downloads) and for `fetch_drive_recordings.
 - `OUTPUT_DIR`: Where transcripts are saved
 
 **Folder Actions setup:**
-- Meet Recordings folder: processes all files
-- Downloads folder: filters for .mp4/.m4a only
+- Meet Recordings folder: use `fetch_drive_recordings.sh` + LaunchAgent, not Folder Actions
+- Regular local folders such as Downloads: use Folder Actions; filter for .mp4/.m4a when monitoring noisy folders
 
 See AUTOMATOR_SETUP_INSTRUCTIONS.md for setup details.
 
