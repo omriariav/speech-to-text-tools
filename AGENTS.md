@@ -91,3 +91,22 @@ recording's name stem.
   defense-in-depth fallback for jobs queued before the enqueue filter.
 - Rejected/suppressed extensions: `gdoc gsheet gslides gdraw gform gmap
   gsite gtable glink gjam gscript`. **Keep the two lists in sync.**
+
+### Drive-API poller (`fetch_drive_recordings.sh`)
+The Meet Recordings folder is now triggered by an hourly Drive-API poll, not a
+Folder Action. It downloads recordings directly via the `gws` CLI (bypassing
+the unreliable Google Drive File Stream materialization) and feeds them to the
+normal enqueue path. The Downloads Folder Action stays for manual local drops.
+
+- **`DRIVE_FOLDER_ID` is LOCAL-ONLY.** It lives in `.env` (gitignored) and must
+  never appear in a committed file — not `.env.example`, not the scripts, not
+  the docs, not the LaunchAgent plist. `.env.example` carries an empty
+  placeholder; the plist reads the ID from `.env` at runtime.
+- Idempotency is keyed on the stable Drive **file ID** via `DRIVE_LEDGER_DIR`
+  (one marker file per ID). Delete a marker to force a re-fetch; pre-seed the
+  ledger to ignore an existing backlog.
+- Only `video/mp4` is fetched, so Gemini "Notes" gdocs are excluded structurally
+  (no shortcut-file dedupe hazard on this path).
+- Hourly via a local LaunchAgent based on
+  `com.speech-to-text-tools.drivepoll.plist.example`; keep the installed plist
+  local if it contains user-specific labels or absolute paths.
