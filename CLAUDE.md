@@ -84,8 +84,25 @@ python audio_splitter.py ./folder --segment-length 600 --format m4a
 python audio_splitter.py ./folder --file recording.m4a --output ./split
 ```
 
+### fetch_drive_recordings.sh
+Drive-API poller and the **trigger for the Meet Recordings folder** (replaces the old Folder Action on that folder). Lists the configured Drive folder via the `gws` CLI, downloads new recordings **directly over the API**, and hands each to `auto_transcribe_meet.sh`. This bypasses Google Drive File Stream materialization entirely — the long-standing source of failures ("Operation not permitted", placeholders that never download, the blind 600s `TRANSCRIPTION_START_DELAY` gamble). The staged file is a real local file, so ffmpeg never trips on a cloud placeholder.
+
+```bash
+./fetch_drive_recordings.sh           # one poll
+DRY_RUN=1 ./fetch_drive_recordings.sh # log what it WOULD fetch, touch nothing
+```
+
+- **Config** (`.env`): `DRIVE_FOLDER_ID` (**local-only — never committed**, see AGENTS.md), `STAGING_DIR`, `DRIVE_LEDGER_DIR`, `STAGING_RETENTION_SECONDS`, `DRIVE_NOTIFY`, optional `GWS_BIN`.
+- **Idempotency**: keyed on the stable Drive **file ID** via a ledger dir (`DRIVE_LEDGER_DIR`). Each recording is fetched + enqueued exactly once. To force a re-fetch of one recording, delete its marker file (named by Drive file ID). To start clean and ignore a backlog, pre-seed the ledger with the current folder's IDs.
+- **Mime filter**: only `video/mp4`. Gemini "Notes" exports are native Google Docs and are excluded for free — the `.gdoc` dedupe hazard that bites the Folder-Action path cannot occur here.
+- **Cleanup**: staged files are pruned once they're no longer referenced by a pending job AND older than `STAGING_RETENTION_SECONDS`.
+- **Schedule**: hourly via a local LaunchAgent based on `com.speech-to-text-tools.drivepoll.plist.example` (`RunAtLoad` + `StartInterval` 3600). No secrets in the plist — the folder ID is read from `.env` at runtime. Keep installed plists local if they contain user-specific labels or absolute paths.
+- **Notifications**: by default, every poll shows a macOS Notification Center summary with new/enqueued count, already-handled count, and error count. Set `DRIVE_NOTIFY=0` to disable.
+
+The **Downloads Folder Action stays** for manual local m4a/mp4 drops (voice recorder etc.); those are real local files and never needed materialization.
+
 ### auto_transcribe_meet.sh
-Entrypoint for macOS Folder Actions. Enqueues a transcription job and returns within ~100ms. A single `auto_transcribe_worker.sh` drains the queue serially so multiple files dropped at once don't load multiple MLX models in parallel and OOM the machine.
+Entrypoint for macOS Folder Actions (Downloads) and for `fetch_drive_recordings.sh`. Enqueues a transcription job and returns within ~100ms. A single `auto_transcribe_worker.sh` drains the queue serially so multiple files dropped at once don't load multiple MLX models in parallel and OOM the machine.
 
 ```bash
 ./auto_transcribe_meet.sh /path/to/video.mp4
@@ -112,8 +129,8 @@ Entrypoint for macOS Folder Actions. Enqueues a transcription job and returns wi
 - `OUTPUT_DIR`: Where transcripts are saved
 
 **Folder Actions setup:**
-- Meet Recordings folder: processes all files
-- Downloads folder: filters for .mp4/.m4a only
+- Meet Recordings folder: use `fetch_drive_recordings.sh` + LaunchAgent, not Folder Actions
+- Regular local folders such as Downloads: use Folder Actions; filter for .mp4/.m4a when monitoring noisy folders
 
 See AUTOMATOR_SETUP_INSTRUCTIONS.md for setup details.
 

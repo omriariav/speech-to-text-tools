@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent: hourly Drive-API poll for Meet recordings.
+
+  Runs fetch_drive_recordings.sh every hour. No secrets here - the Drive
+  folder ID lives in .env (gitignored), read by the script at runtime.
+
+  Install:
+    1. Copy this example to a local plist name, e.g.:
+       cp com.speech-to-text-tools.drivepoll.plist.example ~/Library/LaunchAgents/com.YOURNAME.transcribe.drivepoll.plist
+    2. Replace all /ABSOLUTE/PATH placeholders below with local paths.
+    3. Load it:
+       launchctl unload ~/Library/LaunchAgents/com.YOURNAME.transcribe.drivepoll.plist 2>/dev/null
+       launchctl load   ~/Library/LaunchAgents/com.YOURNAME.transcribe.drivepoll.plist
+  Trigger once now:
+    launchctl start com.YOURNAME.transcribe.drivepoll
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.YOURNAME.transcribe.drivepoll</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/ABSOLUTE/PATH/TO/speech-to-text-tools/fetch_drive_recordings.sh</string>
+    </array>
+
+    <!-- Every hour. -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <!-- Also poll right after login/load so a fresh session catches up. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- launchd's PATH is minimal; include gws (for example, ~/go/bin),
+         Homebrew bins for jq, and system tools. The script also resolves
+         GWS_BIN to an absolute path. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/ABSOLUTE/PATH/TO/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/ABSOLUTE/PATH/TO/transcriptions/drivepoll.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/ABSOLUTE/PATH/TO/transcriptions/drivepoll.launchd.log</string>
+</dict>
+</plist>
