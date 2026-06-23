@@ -90,6 +90,8 @@ Watch for the new files to appear in the configured `OUTPUT_DIR` (takes several 
 
 Check the log file to see progress:
 ```bash
+cd /ABSOLUTE/PATH/TO/speech-to-text-tools
+set -a; source .env; set +a
 tail -f "$LOG_FILE"
 ```
 
@@ -137,6 +139,8 @@ Run the script directly on any MP4/M4A:
 ### Check Logs
 View processing logs:
 ```bash
+cd /ABSOLUTE/PATH/TO/speech-to-text-tools
+set -a; source .env; set +a
 cat "$LOG_FILE"
 ```
 

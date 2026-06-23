@@ -74,6 +74,13 @@ if [ ! -x "$GWS_BIN" ]; then
     fi
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+    message="ERROR: jq binary not found"
+    echo "$message" >&2
+    notify "Drive poll error" "$message"
+    exit 1
+fi
+
 QUEUE_DIR="${QUEUE_DIR:-$OUTPUT_DIR/.queue}"
 STAGING_DIR="${STAGING_DIR:-$OUTPUT_DIR/.staging}"
 DRIVE_LEDGER_DIR="${DRIVE_LEDGER_DIR:-$OUTPUT_DIR/.drive_done}"
@@ -152,6 +159,11 @@ LIST_JSON="$("$GWS_BIN" drive list --folder "$DRIVE_FOLDER_ID" --max "$DRIVE_LIS
 NEW_COUNT=0
 SKIP_COUNT=0
 ERROR_COUNT=0
+MP4_TSV="$(printf '%s' "$LIST_JSON" | jq -r '.files[] | select(.mime_type == "video/mp4") | [.id, .name] | @tsv')" || {
+    log "ERROR: could not parse Drive list JSON. See log."
+    notify "Drive poll error" "Could not parse Drive list JSON. Check the log."
+    exit 1
+}
 
 # id<TAB>name per mp4. Use @tsv so names with spaces/slashes survive intact.
 while IFS=$'\t' read -r FILE_ID FILE_NAME; do
@@ -206,7 +218,7 @@ while IFS=$'\t' read -r FILE_ID FILE_NAME; do
         ERROR_COUNT=$(( ERROR_COUNT + 1 ))
         rm -f "$STAGED_PATH" 2>/dev/null || true
     fi
-done < <(printf '%s' "$LIST_JSON" | jq -r '.files[] | select(.mime_type == "video/mp4") | [.id, .name] | @tsv')
+done <<< "$MP4_TSV"
 
 if [ "$ERROR_COUNT" -gt 0 ]; then
     log "Poll complete: $NEW_COUNT new, $SKIP_COUNT already handled, $ERROR_COUNT errors."
