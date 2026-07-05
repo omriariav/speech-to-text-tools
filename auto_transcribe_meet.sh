@@ -235,6 +235,12 @@ rmdir "$ENQUEUE_LOCK" 2>/dev/null || true
 ENQUEUE_LOCK_OWNED=false
 trap - EXIT
 
+AUTO_TRANSCRIBE_SPAWN_WORKER="${AUTO_TRANSCRIBE_SPAWN_WORKER:-1}"
+if [ "$AUTO_TRANSCRIBE_SPAWN_WORKER" = "0" ]; then
+    log "Worker spawn skipped by AUTO_TRANSCRIBE_SPAWN_WORKER=0."
+    exit 0
+fi
+
 # Always attempt to spawn a worker. The worker itself is the only thing
 # that touches $QUEUE_DIR/.worker.lock: it races for the lock via atomic
 # mkdir, and a loser (one started while a sibling is already holding the

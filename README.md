@@ -46,6 +46,7 @@ Use this for the Google Meet Recordings folder instead of a macOS Folder Action.
 **Features:**
 - Direct Drive API downloads, so ffmpeg receives a fully local file
 - Stable per-file-ID ledger (`DRIVE_LEDGER_DIR`) so each recording is fetched and enqueued once
+- Foreground queue draining under launchd, so the transcription worker is not killed when the poll job exits
 - Local staging cleanup after the configured retention window
 - Hourly launchd scheduling via a local plist based on `com.speech-to-text-tools.drivepoll.plist.example`
 - macOS Notification Center summary on every poll, including new/enqueued count, already-handled count, and errors
@@ -311,6 +312,7 @@ cp .env.example .env
 | `DRIVE_FOLDER_ID` | Google Drive folder ID polled by `fetch_drive_recordings.sh`. Keep the real value only in local `.env`; do not commit it |
 | `STAGING_DIR` | Local directory where Drive API downloads are staged before enqueueing. Keep this outside the Google Drive File Provider path so the worker skips the start delay |
 | `DRIVE_LEDGER_DIR` | Per-Drive-file-ID ledger. Delete a marker to force re-fetching one recording; pre-seed markers to ignore an existing backlog |
+| `DRIVE_DRAIN_QUEUE` | `1` drains the transcription queue in the Drive poller's foreground process after new downloads or when stranded pending jobs exist. Keep enabled under launchd unless a separate worker service drains `QUEUE_DIR` |
 | `STAGING_RETENTION_SECONDS` | How long completed staged files remain before pruning |
 | `DRIVE_NOTIFY` | `1` shows a macOS notification every poll with picked-up/already-handled/error counts. Set to `0` to disable |
 | `GWS_BIN` | Optional absolute path to the `gws` binary. Useful for launchd, which runs with a minimal PATH |
@@ -326,7 +328,7 @@ There are two automation paths:
    DRY_RUN=1 ./fetch_drive_recordings.sh
    ```
 
-   Start from `com.speech-to-text-tools.drivepoll.plist.example`, copy it to a local plist under `~/Library/LaunchAgents/`, replace the placeholder paths, then load it with `launchctl`.
+   Start from `com.speech-to-text-tools.drivepoll.plist.example`, copy it to a local plist under `~/Library/LaunchAgents/`, replace the placeholder paths, then load it with `launchctl`. The poller drains the worker in the foreground by default so launchd does not terminate transcription when the poll command exits.
 
 2. **Regular local folders**: use a macOS Folder Action that calls `auto_transcribe_meet.sh` for files added to a local folder such as Downloads or a voice-recorder import folder. This path remains useful for real local MP4/M4A files and does not require the Drive poller. See [AUTOMATOR_SETUP_INSTRUCTIONS.md](AUTOMATOR_SETUP_INSTRUCTIONS.md).
 

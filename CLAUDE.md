@@ -92,9 +92,10 @@ Drive-API poller and the **trigger for the Meet Recordings folder** (replaces th
 DRY_RUN=1 ./fetch_drive_recordings.sh # log what it WOULD fetch, touch nothing
 ```
 
-- **Config** (`.env`): `DRIVE_FOLDER_ID` (**local-only — never committed**, see AGENTS.md), `STAGING_DIR`, `DRIVE_LEDGER_DIR`, `STAGING_RETENTION_SECONDS`, `DRIVE_NOTIFY`, optional `GWS_BIN`.
+- **Config** (`.env`): `DRIVE_FOLDER_ID` (**local-only — never committed**, see AGENTS.md), `STAGING_DIR`, `DRIVE_LEDGER_DIR`, `DRIVE_DRAIN_QUEUE`, `STAGING_RETENTION_SECONDS`, `DRIVE_NOTIFY`, optional `GWS_BIN`.
 - **Idempotency**: keyed on the stable Drive **file ID** via a ledger dir (`DRIVE_LEDGER_DIR`). Each recording is fetched + enqueued exactly once. To force a re-fetch of one recording, delete its marker file (named by Drive file ID). To start clean and ignore a backlog, pre-seed the ledger with the current folder's IDs.
 - **Mime filter**: only `video/mp4`. Gemini "Notes" exports are native Google Docs and are excluded for free — the `.gdoc` dedupe hazard that bites the Folder-Action path cannot occur here.
+- **Worker lifecycle**: `DRIVE_DRAIN_QUEUE=1` (default) suppresses the enqueuer's detached background worker and drains the queue in the poller's foreground process, preventing launchd from SIGTERM'ing transcription when the poll command exits.
 - **Cleanup**: staged files are pruned once they're no longer referenced by a pending job AND older than `STAGING_RETENTION_SECONDS`.
 - **Schedule**: hourly via a local LaunchAgent based on `com.speech-to-text-tools.drivepoll.plist.example` (`RunAtLoad` + `StartInterval` 3600). No secrets in the plist — the folder ID is read from `.env` at runtime. Keep installed plists local if they contain user-specific labels or absolute paths.
 - **Notifications**: by default, every poll shows a macOS Notification Center summary with new/enqueued count, already-handled count, and error count. Set `DRIVE_NOTIFY=0` to disable.
@@ -149,6 +150,7 @@ See AUTOMATOR_SETUP_INSTRUCTIONS.md for setup details.
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover engine dispatch, model-name mapping, output normalization, and
-diarization alignment. They mock the underlying ML libraries — no real model
+Tests cover engine dispatch, model-name mapping, output normalization,
+diarization alignment, and Drive poller queue/launchd behavior. They mock the
+underlying ML libraries and Drive/enqueue/worker commands — no real model
 inference, runs in milliseconds.
