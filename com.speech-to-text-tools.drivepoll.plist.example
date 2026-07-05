@@ -35,6 +35,13 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- Defensive guard: launchd normally terminates leftover processes in
+         the same process group when this poll job exits. The poller drains the
+         worker in the foreground, but keep this true so any helper it starts
+         is not SIGTERM'd on poll completion. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
     <!-- launchd's PATH is minimal; include gws (for example, ~/go/bin),
          Homebrew bins for jq, and system tools. The script also resolves
          GWS_BIN to an absolute path. -->
